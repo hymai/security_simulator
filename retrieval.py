@@ -19,6 +19,11 @@ The two indices are kept separate on purpose: `threats` (threat catalog + site
 security measures) feeds scenario generation; `sops` (response procedures) feeds
 answer-key generation. The scenario stage never queries `sops`, so it cannot
 leak the response plan.
+
+Corpora are organized per-profile so one install can host multiple sites/
+organizations: `profiles/<profile>/data/{threats,sops}/*.md` are the source
+docs, `.index/<profile>/{threats,sops}.{npz,json}` are the built indices. See
+corpus_config.py for the incident-type config that goes alongside each profile.
 """
 
 import glob
@@ -30,8 +35,16 @@ from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "BAAI/bge-m3"
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(_HERE, "data")
-INDEX_DIR = os.path.join(_HERE, ".index")
+PROFILES_DIR = os.path.join(_HERE, "profiles")
+INDEX_ROOT = os.path.join(_HERE, ".index")
+
+
+def profile_data_dir(profile: str) -> str:
+    return os.path.join(PROFILES_DIR, profile, "data")
+
+
+def profile_index_dir(profile: str) -> str:
+    return os.path.join(INDEX_ROOT, profile)
 
 _model = None
 
@@ -93,9 +106,9 @@ def chunk_markdown(text: str, source: str) -> list[dict]:
     return chunks
 
 
-def build_index(name: str) -> dict:
-    """Build (and persist) the index for corpus `name` (a subdir of data/)."""
-    corpus_dir = os.path.join(DATA_DIR, name)
+def build_index(profile: str, name: str) -> dict:
+    """Build (and persist) the `name` index (threats/sops) for `profile`."""
+    corpus_dir = os.path.join(profile_data_dir(profile), name)
     paths = sorted(glob.glob(os.path.join(corpus_dir, "*.md")))
     if not paths:
         raise FileNotFoundError(f"No .md files in {corpus_dir}")
@@ -107,24 +120,36 @@ def build_index(name: str) -> dict:
 
     vectors = _embed([c["text"] for c in chunks])
 
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    np.savez(os.path.join(INDEX_DIR, f"{name}.npz"), vectors=vectors)
-    with open(os.path.join(INDEX_DIR, f"{name}.json"), "w", encoding="utf-8") as f:
+    index_dir = profile_index_dir(profile)
+    os.makedirs(index_dir, exist_ok=True)
+    np.savez(os.path.join(index_dir, f"{name}.npz"), vectors=vectors)
+    with open(os.path.join(index_dir, f"{name}.json"), "w", encoding="utf-8") as f:
         json.dump(chunks, f, ensure_ascii=False, indent=2)
 
     return {"name": name, "vectors": vectors, "chunks": chunks}
 
 
-def load_index(name: str) -> dict:
-    """Load a persisted index, building it if missing."""
-    npz_path = os.path.join(INDEX_DIR, f"{name}.npz")
-    json_path = os.path.join(INDEX_DIR, f"{name}.json")
+def load_index(profile: str, name: str) -> dict:
+    """Load a persisted index for `profile`, building it if missing."""
+    index_dir = profile_index_dir(profile)
+    npz_path = os.path.join(index_dir, f"{name}.npz")
+    json_path = os.path.join(index_dir, f"{name}.json")
     if not (os.path.exists(npz_path) and os.path.exists(json_path)):
-        return build_index(name)
+        return build_index(profile, name)
     vectors = np.load(npz_path)["vectors"]
     with open(json_path, encoding="utf-8") as f:
         chunks = json.load(f)
     return {"name": name, "vectors": vectors, "chunks": chunks}
+
+
+def list_profiles() -> list[str]:
+    """Profiles are subdirs of profiles/ that have a config.json."""
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    return sorted(
+        p for p in os.listdir(PROFILES_DIR)
+        if os.path.isfile(os.path.join(PROFILES_DIR, p, "config.json"))
+    )
 
 
 def search(index: dict, query: str, k: int = 5, cutoff: float | None = None) -> list[dict]:

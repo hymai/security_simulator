@@ -1,9 +1,9 @@
 """
 The three stages, wiring retrieval + the local model together.
 
-  generate_scenario(incident_types)  -> scenario dict          (creative, temp 0.8)
-  generate_answer_key(scenario)      -> ordered step list       (deterministic, temp 0)
-  grade_step(step, trainee_answer)   -> verdict dict            (deterministic, temp 0)
+  generate_scenario(incident_types)                    -> scenario dict   (creative, temp 0.8)
+  generate_answer_key(scenario)                        -> ordered step list  (deterministic, temp 0)
+  grade_step(step, scenario_text, prior_answer, msg)    -> verdict dict   (deterministic, temp 0)
 
 Corpus separation is enforced here: generate_scenario queries only the `threats`
 index, generate_answer_key only the `sops` index. The scenario generator never
@@ -17,6 +17,7 @@ filename, so it can't hallucinate one.
 
 import logging
 
+import corpus_config
 import grading
 import retrieval
 from ollama_client import ollama_chat
@@ -35,12 +36,10 @@ RETRIEVAL_CUTOFF: float | None = None
 RETRIEVAL_K = 6
 NUM_CTX = 8192
 
-# Map each incident-type checkbox to threat-catalog vocabulary for retrieval.
-_TYPE_QUERY = {
-    "Physical Security": "unauthorized perimeter entry, intruder crossing the Zone 3 fence, tailgating",
-    "Cyber Security": "intrusion into the SCADA OT control network, compromised engineering workstation, ransomware",
-    "Facilities Management": "fire in an occupied building, Block B smoke detectors, loss of power or HVAC",
-}
+# Incident-type checkboxes and their threat-catalog retrieval vocabulary are
+# per-profile config (profiles/<profile>/config.json), not hardcoded here —
+# see corpus_config.py. This lets a new organization's SOPs/threat catalog be
+# dropped in as its own profile without touching this file.
 
 # --- Stage 1: scenario generation ------------------------------------------
 
@@ -48,7 +47,17 @@ _SCENARIO_SCHEMA = {
     "type": "object",
     "properties": {
         "incident_types": {"type": "array", "items": {"type": "string"}},
-        "threats": {"type": "array", "items": {"type": "string"}},
+        "threats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "incident_type": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["incident_type", "description"],
+            },
+        },
         "location": {"type": "string"},
         "time": {"type": "string"},
         "scenario": {"type": "string"},
@@ -63,6 +72,8 @@ site's threats and its security systems. Write a realistic training scenario.
 
 Rules:
 - Choose two or three concrete threats that fit the selected incident types.
+- For each threat, tag it with which of the selected incident types it belongs
+  to (exactly one of the given labels) and a short description of the threat.
 - Mention only the security systems that the chosen threats would actually
   trigger (e.g. a perimeter alarm, a fire detector). Do not invent systems.
 - Perpetrators may behave unpredictably and may not breach every layer of defense;
@@ -75,15 +86,16 @@ Rules:
 Return only JSON."""
 
 
-def generate_scenario(incident_types: list[str], on_token=None) -> dict:
+def generate_scenario(incident_types: list[str], profile: str = "default", on_token=None) -> dict:
     """Stage 1. Retrieve from the threats corpus and write a scenario.
 
     `on_token(count, elapsed_s)`, if given, is called as the model streams —
     see ollama_client.ollama_chat. Generation is ~6 tok/s on this model/
     hardware (measured), so this is for progress display, not speed.
     """
-    query = "; ".join(_TYPE_QUERY[t] for t in incident_types if t in _TYPE_QUERY)
-    index = retrieval.load_index("threats")
+    type_query = corpus_config.load_config(profile)["incident_types"]
+    query = "; ".join(type_query[t] for t in incident_types if t in type_query)
+    index = retrieval.load_index(profile, "threats")
     hits = retrieval.search(index, query, k=RETRIEVAL_K, cutoff=RETRIEVAL_CUTOFF)
 
     sources = _label_sources(hits)
@@ -98,9 +110,22 @@ def generate_scenario(incident_types: list[str], on_token=None) -> dict:
 
 
 def _render_scenario(s: dict) -> str:
+    """Plain-text rendering (no HTML) — this is what's stored as scenario["text"]
+    and used for the downloadable training record, so it has to stay readable
+    as raw markdown. The colorized on-screen version is built separately by
+    the UI layer (see ui_colors.py + security_simulator.py) from the same
+    structured `threats` list, so the download never contains embedded HTML."""
+    lines = []
+    for t in s.get("threats", []):
+        if isinstance(t, dict):
+            label = t.get("incident_type", "")
+            desc = t.get("description", "")
+            lines.append(f"- [{label}] {desc}" if label else f"- {desc}")
+        else:
+            lines.append(f"- {t}")
     return (
         f"**Incident type & Threat**\n"
-        + "\n".join(f"- {t}" for t in s.get("threats", [])) + "\n\n"
+        + "\n".join(lines) + "\n\n"
         f"**Location**: {s.get('location', '')}\n\n"
         f"**Time**: {s.get('time', '')}\n\n"
         f"**Scenario**\n\n{s.get('scenario', '')}"
@@ -155,7 +180,7 @@ For each step give:
 Return only JSON."""
 
 
-def generate_answer_key(scenario: dict, on_token=None) -> list[dict]:
+def generate_answer_key(scenario: dict, profile: str = "default", on_token=None) -> list[dict]:
     """Stage 2. Retrieve from the SOP corpus and derive the ordered answer key.
 
     Returns steps as:
@@ -169,7 +194,7 @@ def generate_answer_key(scenario: dict, on_token=None) -> list[dict]:
     matters most here.
     """
     scenario_text = scenario.get("scenario", "") or scenario.get("text", "")
-    index = retrieval.load_index("sops")
+    index = retrieval.load_index(profile, "sops")
     hits = retrieval.search(index, scenario_text, k=RETRIEVAL_K, cutoff=RETRIEVAL_CUTOFF)
 
     label_to_source = {f"S{i}": h["source"] for i, h in enumerate(hits, 1)}
@@ -199,34 +224,53 @@ def generate_answer_key(scenario: dict, on_token=None) -> list[dict]:
 
 # --- Stage 3: grading ------------------------------------------------------
 
-def grade_step(step: dict, trainee_answer: str) -> dict:
-    """Stage 3. Grade one step's answer. Returns coverage + hint; never the key.
+def grade_step(step: dict, scenario_text: str, prior_answer: str, new_message: str) -> dict:
+    """Stage 3. Grade one turn of one step, or answer a clarifying question.
+
+    Grades against EVERYTHING the trainee has said for this step so far
+    (`prior_answer`, the joined text of earlier turns) plus `new_message` —
+    not `new_message` alone — so a multi-turn answer accumulates instead of
+    needing to be retyped in one message. `message_type` distinguishes a
+    genuine answer attempt from a clarifying question so the tutor can answer
+    the question directly instead of grading it as an incomplete attempt.
 
     Advancement is decided by the caller from `complete` (covered == all ids) —
-    the model's own step_complete boolean is treated as advisory only.
+    the model's own step_complete boolean is treated as advisory only. Never
+    returns the key: coverage is ids only, and `reply` is leak-checked before
+    it goes back to the caller.
     """
     all_ids = set(step["actions"])
     user = grading.build_user_prompt(
-        step["step"], step["title"], step["actions"], trainee_answer)
+        step["step"], step["title"], step["actions"], scenario_text,
+        prior_answer, new_message)
     result = ollama_chat(grading.SYSTEM, user, grading.SCHEMA, temperature=0, num_ctx=NUM_CTX)
 
-    covered = set(result["covered_action_ids"]) & all_ids   # discard hallucinated ids
+    message_type = result.get("message_type", "answer_attempt")
+    covered = set(result.get("covered_action_ids", [])) & all_ids   # discard hallucinated ids
     missing = all_ids - covered
-    hint = result.get("hint", "")
+    reply = result.get("reply", "")
 
     # Belt-and-suspenders: the schema design already prevents the key from
-    # reaching the output, but re-run the spike's overlap check on the live hint.
+    # reaching the output, but re-run the spike's overlap check on the live reply.
+    # A clarification legitimately shares scenario nouns with the withheld
+    # actions (both describe the same physical world) so it gets a longer
+    # minimum overlap before flagging — see grading.leaks' docstring.
     missing_texts = {aid: step["actions"][aid][1] for aid in missing}
-    leaked = grading.leaks(hint, missing_texts)
+    min_gram = 4 if message_type == "answer_attempt" else 6
+    leaked = grading.leaks(reply, missing_texts, min_gram=min_gram)
     if leaked:
-        log.warning("hint overlapped missing action(s) %s; suppressing hint", leaked)
-        hint = "You're missing something for this step — think about which roles still have an action."
+        log.warning("reply overlapped missing action(s) %s; suppressing", leaked)
+        reply = ("You're missing something for this step — think about which "
+                "roles still have an action.") if message_type == "answer_attempt" else (
+            "I can't confirm specific actions for this step — go ahead and "
+            "describe what you'd do and I'll grade it.")
 
     return {
+        "message_type": message_type,
         "covered_ids": covered,
         "missing_ids": missing,
         "complete": covered == all_ids,
-        "hint": hint,
+        "reply": reply,
     }
 
 

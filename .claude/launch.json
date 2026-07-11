@@ -4,7 +4,7 @@
     {
       "name": "simulator",
       "runtimeExecutable": ".venv/bin/streamlit",
-      "runtimeArgs": ["run", "security_simulator.py", "--server.headless=true", "--server.port=8760"],
+      "runtimeArgs": ["run", "security_simulator.py", "--server.headless=true", "--server.port=8760", "--server.fileWatcherType=none"],
       "port": 8760
     }
   ]

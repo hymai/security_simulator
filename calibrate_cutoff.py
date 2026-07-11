@@ -45,8 +45,8 @@ OUT_OF_DOMAIN = [
 ]
 
 
-def calibrate(name: str) -> None:
-    index = retrieval.load_index(name)
+def calibrate(name: str, profile: str = "default") -> None:
+    index = retrieval.load_index(profile, name)
     pairs = LABELLED[name]
 
     print(f"\n=== corpus: {name}  ({len(index['chunks'])} chunks) ===")

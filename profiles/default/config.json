@@ -1,0 +1,8 @@
+{
+  "display_name": "Industrial Site (Physical / Cyber / Facilities)",
+  "incident_types": {
+    "Physical Security": "unauthorized perimeter entry, intruder crossing the Zone 3 fence, tailgating",
+    "Cyber Security": "intrusion into the SCADA OT control network, compromised engineering workstation, ransomware",
+    "Facilities Management": "fire in an occupied building, Block B smoke detectors, loss of power or HVAC"
+  }
+}
