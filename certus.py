@@ -1,5 +1,5 @@
 """
-Security incident training simulator — fully local (Ollama + BGE-M3).
+Certus — operational readiness platform, fully local (Ollama + BGE-M3).
 
 Three stages:
   1. Pick incident types  -> a scenario is generated from the threat corpus.
@@ -17,7 +17,7 @@ a clarifying question rather than an answer attempt is detected and answered
 directly instead of being graded as an incomplete attempt (see grading.py).
 
 Run:  ollama serve            # in another terminal, with qwen2.5:14b pulled
-      streamlit run security_simulator.py
+      streamlit run certus.py
 """
 
 import logging
@@ -27,11 +27,13 @@ import streamlit as st
 import admin_panel
 import corpus_config
 import pipeline
+import retention
 import retrieval
 import storage
 import ui_colors
 
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("certus.app")
 
 
 @st.cache_resource(show_spinner="Loading embedding model and indices…")
@@ -46,7 +48,7 @@ def warm_up(profile: str):
 def reset_session():
     for k in ("scenario", "steps", "current_step", "messages", "complete", "profile",
              "record_session", "trainee_name", "db_session_id", "attempt_counts",
-             "step_answers"):
+             "step_answers", "retention_updates"):
         st.session_state.pop(k, None)
     st.session_state.stage = 0
 
@@ -102,17 +104,30 @@ def build_reply(verdict: dict, steps: list) -> str:
 
     n = len(steps)
     if not verdict["complete"]:
-        # Stay on this step. Show the hint only (never the missing actions' text).
-        return f"Not quite — {verdict['reply']}"
+        # Stay on this step. Acknowledge partial credit by COUNT only (never
+        # the missing actions' text) — a flat "Not quite" on every incomplete
+        # attempt erases real progress and reads as "you're wrong" even when
+        # most of the answer was right.
+        covered, total = len(verdict["covered_ids"]), len(verdict["covered_ids"]) + len(verdict["missing_ids"])
+        prefix = f"✓ {covered} of {total} covered — " if covered else "Not quite — "
+        return f"{prefix}{verdict['reply']}"
 
     idx = st.session_state.current_step
     st.session_state.current_step += 1
+    done = steps[idx]
+    # The step TITLE is revealed only here, after completion — retrospectively
+    # it's feedback; shown up front it would summarize the expected response.
+    # Orientation for the NEXT step uses its threat cue instead: the scenario's
+    # own wording, which the trainee has already read (see pipeline.py).
     if st.session_state.current_step >= n:
         st.session_state.complete = True
-        return f"✅ Step {idx + 1} complete. That's all {n} steps — well done! See the summary below."
+        return (f"✅ Step {idx + 1} — *{done['title']}* — complete. "
+                f"That's all {n} steps — well done! See the summary below.")
+    cue = steps[st.session_state.current_step].get("threat", "")
+    orient = f" This one responds to: *{cue}*." if cue else ""
     return (
-        f"✅ Step {idx + 1} of {n} complete. "
-        f"Now give me the actions for **Step {idx + 2}**."
+        f"✅ Step {idx + 1} — *{done['title']}* — complete. "
+        f"Now give me the actions for **Step {idx + 2}**.{orient}"
     )
 
 
@@ -133,6 +148,10 @@ def render_summary_download(steps: list):
         st.markdown(record)
     st.download_button("Download training record (.md)", record,
                        file_name="training_record.md", mime="text/markdown")
+    updates = st.session_state.get("retention_updates")
+    if updates:
+        st.caption("Next reviews: " + " · ".join(
+            f"{u['source']} in {u['interval_days']:.0f} day(s)" for u in updates))
     if st.button("Start a new scenario"):
         reset_session()
         st.rerun()
@@ -140,8 +159,8 @@ def render_summary_download(steps: list):
 
 # --- app -------------------------------------------------------------------
 
-st.set_page_config(page_title="Security Training Simulator", page_icon="🛡️")
-st.title("🛡️ Incident Scenario & Response Trainer")
+st.set_page_config(page_title="Certus", page_icon="🛡️")
+st.title("🛡️ Certus — Incident Scenario & Response Trainer")
 
 st.session_state.setdefault("stage", 0)
 
@@ -171,19 +190,45 @@ if profiles:
     st.sidebar.markdown(
         " ".join(ui_colors.badge(t) for t in incident_types), unsafe_allow_html=True)
 
+    # Identity lives OUTSIDE the form (plain widgets reflect their value on
+    # every rerun, so the submit handler below still reads them as locals):
+    # knowing who's training *before* incident-type selection is what lets
+    # the due-for-review panel inform that selection.
+    trainee_name, record_session = "", False
+    if storage.RECORDING_ENABLED:
+        st.sidebar.markdown("---")
+        trainee_name = st.sidebar.text_input(
+            "Your name (for the instructor's records)")
+        record_session = st.sidebar.checkbox(
+            "Record this session for instructor review", value=True,
+            help="The instructor for this site has enabled session review. "
+                 "Uncheck to opt out — nothing about this session is then "
+                 "stored on the server.")
+
+        if record_session and trainee_name.strip():
+            due = retention.due_for_review(active_profile, trainee_name)
+            if due:
+                with st.sidebar.expander(f"📅 Due for review ({len(due)})",
+                                         expanded=True):
+                    for d in due:
+                        overdue = (f"{d['days_overdue']} day(s) overdue"
+                                   if d["days_overdue"] > 0 else "due today")
+                        suggest = ", ".join(d["suggested_types"]) or "—"
+                        st.markdown(f"`{d['source']}` — {overdue} · try: {suggest}")
+                    st.caption(
+                        "Selecting the suggested incident types makes it "
+                        "likely — not guaranteed — that a fresh scenario "
+                        "exercises these procedures again.")
+                    suggested = sorted({t for d in due for t in d["suggested_types"]
+                                        if t in incident_types})
+                    # Rendered before the multiselect instantiates on this
+                    # run, so setting its key here simply prefills it.
+                    if suggested and st.button("Use suggested types"):
+                        st.session_state[f"types_{active_profile}"] = suggested
+
     with st.sidebar.form("generate_form"):
         selected = st.multiselect("Incident type(s)", incident_types,
                                   key=f"types_{active_profile}")
-
-        trainee_name, record_session = "", False
-        if storage.RECORDING_ENABLED:
-            st.markdown("---")
-            trainee_name = st.text_input("Your name (for the instructor's records)")
-            record_session = st.checkbox(
-                "Record this session for instructor review", value=True,
-                help="The instructor for this site has enabled session review. "
-                     "Uncheck to opt out — nothing about this session is then "
-                     "stored on the server.")
 
         if st.form_submit_button("Generate Scenario"):
             if not selected:
@@ -231,12 +276,14 @@ if st.session_state.stage == 1:
         st.session_state.complete = False
         if st.session_state.get("record_session"):
             storage.save_steps(st.session_state.db_session_id, steps)
+        first_cue = steps[0].get("threat", "")
+        first_orient = f" It responds to: *{first_cue}*." if first_cue else ""
         st.session_state.messages = [{
             "role": "assistant",
             "content": (
                 f"I'm your trainer for today. This scenario has **{len(steps)} step(s)**. "
-                "Give me the actions for each role in **Step 1** to begin — consider every "
-                "stakeholder, not just one role."
+                f"Give me the actions for each role in **Step 1** to begin —"
+                f" consider every stakeholder, not just one role.{first_orient}"
             ),
         }]
         st.session_state.stage = 2
@@ -248,7 +295,10 @@ if st.session_state.stage == 2:
     n = len(steps)
 
     if not st.session_state.complete:
-        st.info(f"Progress: **Step {st.session_state.current_step + 1} of {n}**")
+        current = steps[st.session_state.current_step]
+        cue = current.get("threat", "")
+        suffix = f" — responding to: {cue}" if cue else ""
+        st.info(f"Progress: **Step {st.session_state.current_step + 1} of {n}**{suffix}")
 
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
@@ -287,6 +337,15 @@ if st.session_state.stage == 2:
             reply = build_reply(verdict, steps)
             if st.session_state.complete and st.session_state.get("record_session"):
                 storage.complete_session(st.session_state.db_session_id)
+                # Advance spaced-repetition state for every SOP source this
+                # session actually exercised. Never let a retention bug block
+                # the trainee's completion — recording is strictly additive.
+                try:
+                    st.session_state.retention_updates = \
+                        retention.update_from_session(st.session_state.db_session_id)
+                except Exception:
+                    log.exception("retention update failed for session %s",
+                                  st.session_state.db_session_id)
             st.markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
         st.rerun()

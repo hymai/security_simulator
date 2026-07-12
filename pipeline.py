@@ -22,7 +22,7 @@ import grading
 import retrieval
 from ollama_client import ollama_chat
 
-log = logging.getLogger("simulator.pipeline")
+log = logging.getLogger("certus.pipeline")
 
 # Measured with calibrate_cutoff.py (BGE-M3, this corpus), not inherited:
 #   SOPs   — weakest true hit 0.444, strongest out-of-domain 0.407  (gap 0.037)
@@ -113,7 +113,7 @@ def _render_scenario(s: dict) -> str:
     """Plain-text rendering (no HTML) — this is what's stored as scenario["text"]
     and used for the downloadable training record, so it has to stay readable
     as raw markdown. The colorized on-screen version is built separately by
-    the UI layer (see ui_colors.py + security_simulator.py) from the same
+    the UI layer (see ui_colors.py + certus.py) from the same
     structured `threats` list, so the download never contains embedded HTML."""
     lines = []
     for t in s.get("threats", []):
@@ -143,6 +143,7 @@ _KEY_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string"},
+                    "threat": {"type": "string"},
                     "actions": {
                         "type": "array",
                         "items": {
@@ -156,7 +157,7 @@ _KEY_SCHEMA = {
                     },
                     "source_ids": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["title", "actions", "source_ids"],
+                "required": ["title", "threat", "actions", "source_ids"],
             },
         },
     },
@@ -174,6 +175,10 @@ in the scenario must be responded to, resolved, and reported.
 
 For each step give:
 - a short title,
+- threat: which scenario threat this step responds to, in a few words taken from
+  the scenario's own wording. This is shown to the trainee BEFORE they answer, so
+  it must only restate what the scenario already says — never mention, hint at,
+  or foreshadow any response action, procedure, or role,
 - the actions to take, each as a specific action performed by a named human role,
 - source_ids: the labels ([S1], ...) of the sources that step is based on.
 
@@ -217,8 +222,15 @@ def generate_answer_key(scenario: dict, profile: str = "default", on_token=None)
             for sid in s.get("source_ids", [])
             if sid.strip("[]") in label_to_source
         })
+        # The threat cue is shown to the trainee BEFORE they answer, so it gets
+        # the same overlap guard as live hints: if the model smuggled response
+        # actions into it, drop it (the trainee just loses the orientation cue).
+        threat = s.get("threat", "").strip()
+        if threat and grading.leaks(threat, {aid: a for aid, (_, a) in actions.items()}):
+            log.warning("step %d threat cue overlapped its own actions; dropping", i)
+            threat = ""
         steps.append({"step": i, "title": s.get("title", f"Step {i}"),
-                      "actions": actions, "sources": sources})
+                      "threat": threat, "actions": actions, "sources": sources})
     return steps
 
 

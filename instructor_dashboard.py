@@ -12,10 +12,12 @@ Two views:
 """
 
 import json
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
+import retention
 import storage
 
 
@@ -71,12 +73,75 @@ def _render_most_missed_tab(profile: str | None) -> None:
     st.dataframe(df, hide_index=True, width="stretch")
 
 
+def _render_retention_tab(profile: str | None) -> None:
+    # 1. Drill queue — the local-first nudge: who should re-drill what, now.
+    st.markdown("**Drill queue** — trainees with SOPs due for re-drilling")
+    due = storage.due_retention_states(profile)
+    if not due:
+        st.info("Nothing due for review. The queue fills in as trainees "
+                "complete recorded sessions and their review dates arrive.")
+    else:
+        now = datetime.now(timezone.utc)
+        rows = [{
+            "trainee": d["trainee_display"],
+            "SOP source": d["source"],
+            "due": d["due_at"][:10],
+            "days overdue": max(0, (now - datetime.fromisoformat(d["due_at"])).days),
+            "last quality (0-5)": d["last_quality"],
+            "interval (days)": round(d["interval_days"]),
+        } for d in due]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    # 2. The headline proof metric, derived from base tables at read time —
+    # works retroactively over sessions recorded before this feature existed.
+    st.markdown("**Cohort retention** — did a trainee still know the "
+                "procedure when it resurfaced 30/90+ days later?")
+    metrics = retention.retention_metrics(profile)
+    if not metrics["d30"]["n"]:
+        st.info("Not enough data yet: this metric needs the same trainee to "
+                "re-encounter the same SOP at least 30 days apart. It fills "
+                "in as the cohort keeps drilling.")
+    else:
+        col30, col90 = st.columns(2)
+        for col, key, label in ((col30, "d30", "30-day"), (col90, "d90", "90-day")):
+            w = metrics[key]
+            with col:
+                if w["n"]:
+                    st.metric(f"{label} retention", f"{w['retained_pct']:.0f}%",
+                              help="Share of re-encounters ≥ that many days later "
+                                   "completed within 2 attempts per step. The "
+                                   "stricter first-attempt-clean number is below.")
+                    st.caption(f"{w['n']} check(s) · strict (first attempt "
+                               f"clean): {w['strict_pct']:.0f}%")
+                else:
+                    st.metric(f"{label} retention", "—")
+                    st.caption("no checks that far apart yet")
+        if metrics["per_source"]:
+            df = pd.DataFrame(metrics["per_source"])
+            df["retained ≥30d"] = df.apply(
+                lambda r: f"{100 * r['ret30'] / r['n30']:.0f}%" if r["n30"] else "—", axis=1)
+            df["retained ≥90d"] = df.apply(
+                lambda r: f"{100 * r['ret90'] / r['n90']:.0f}%" if r["n90"] else "—", axis=1)
+            df = df[["source", "n30", "retained ≥30d", "n90", "retained ≥90d"]]
+            df.columns = ["SOP source", "checks ≥30d", "retained ≥30d",
+                          "checks ≥90d", "retained ≥90d"]
+            st.dataframe(df, hide_index=True, width="stretch")
+
+    # 3. Maintenance: state is a materialized view — rebuild backfills
+    # pre-retention history and re-derives after constant tuning.
+    if st.button("Rebuild retention schedule from history"):
+        n = retention.rebuild_all(profile)
+        st.success(f"Replayed {n} completed session(s) into retention state.")
+    st.caption("Rebuilding replays recorded sessions — all retention state "
+               "is derived; nothing new is collected.")
+
+
 def render() -> None:
     st.subheader("📊 Instructor dashboard")
     if not storage.RECORDING_ENABLED:
         st.caption(
             "Session recording is currently OFF for new sessions (set "
-            "SIMULATOR_RECORD_SESSIONS to turn it on). Showing previously "
+            "CERTUS_RECORD_SESSIONS to turn it on). Showing previously "
             "recorded data, if any.")
 
     profiles = storage.list_profiles_with_sessions()
@@ -87,8 +152,11 @@ def render() -> None:
     choice = st.selectbox("Profile", ["All"] + profiles, key="dashboard_profile_filter")
     selected_profile = None if choice == "All" else choice
 
-    tab_sessions, tab_missed = st.tabs(["Sessions", "Most-missed SOP steps"])
+    tab_sessions, tab_missed, tab_retention = st.tabs(
+        ["Sessions", "Most-missed SOP steps", "Retention"])
     with tab_sessions:
         _render_sessions_tab(selected_profile)
     with tab_missed:
         _render_most_missed_tab(selected_profile)
+    with tab_retention:
+        _render_retention_tab(selected_profile)

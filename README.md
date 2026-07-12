@@ -1,6 +1,6 @@
-# Security Training Simulator
+# Certus
 
-A fully local security-incident training simulator. It generates a realistic
+A fully local operational readiness platform. It generates a realistic
 incident scenario, derives an authoritative response plan from a set of SOPs,
 and then walks a trainee through the response one step at a time as a
 Socratic tutor — grading each answer and nudging toward what's missing
@@ -71,7 +71,7 @@ ollama pull qwen2.5:14b
 
 ```bash
 ollama serve            # in one terminal
-streamlit run security_simulator.py --server.fileWatcherType=none   # in another
+streamlit run certus.py --server.fileWatcherType=none   # in another
 ```
 
 `--server.fileWatcherType=none` avoids intermittent instability observed on
@@ -84,14 +84,15 @@ the app's own source.
 
 | File | Purpose |
 |---|---|
-| `security_simulator.py` | Streamlit UI and session state machine |
+| `certus.py` | Streamlit UI and session state machine |
 | `pipeline.py` | The three stages: scenario, answer key, grading |
 | `retrieval.py` | BGE-M3 embedding + index search, per-profile |
 | `corpus_config.py` | Loads each profile's `config.json` (incident types) |
 | `build_index.py` | CLI to onboard a new profile: build indices, infer incident types |
 | `admin_panel.py` | Password-gated sidebar: corpus upload + instructor dashboard |
 | `storage.py` | Optional local SQLite persistence of session records (opt-in, see below) |
-| `instructor_dashboard.py` | Per-trainee history and most-missed-SOP-step analytics |
+| `retention.py` | Spaced-repetition engine (SM-2) over recorded sessions — see below |
+| `instructor_dashboard.py` | Per-trainee history, most-missed-SOP-step, and retention analytics |
 | `ollama_client.py` | Local Ollama chat client (streaming, JSON schema) |
 | `grading.py` | Grading prompt and leak-detection for hints |
 | `calibrate_cutoff.py` | Script used to measure retrieval similarity cutoffs |
@@ -111,10 +112,10 @@ An instructor running a cohort can opt in to recording sessions locally
 (SQLite) for review:
 
 ```bash
-SIMULATOR_RECORD_SESSIONS=1 SIMULATOR_ADMIN_PASSWORD=... streamlit run security_simulator.py
+CERTUS_RECORD_SESSIONS=1 CERTUS_ADMIN_PASSWORD=... streamlit run certus.py
 ```
 
-With `SIMULATOR_RECORD_SESSIONS` set, each trainee sees a "Record this session
+With `CERTUS_RECORD_SESSIONS` set, each trainee sees a "Record this session
 for instructor review" checkbox (checked by default, but they can opt out
 per-session) and an optional name field before generating a scenario. Nothing
 is recorded unless that variable is set — there's no way to record silently.
@@ -132,6 +133,28 @@ sensitive as the SOP corpus):
   point of the app) — the file is the one thing that stays stable across
   runs. A high miss rate on a given SOP is a signal the document itself is
   unclear, not that trainees are careless.
+- **Retention** — spaced repetition and the 30/90-day proof metric (below).
+
+## Spaced repetition & retention (opt-in, built on session recording)
+
+When session recording is enabled and a trainee gives their name, Certus
+tracks which SOP source files they struggled with and schedules re-drills at
+expanding intervals (canonical SM-2 — quality is derived from how many
+attempts each step took). Next time that trainee returns, the sidebar shows a
+**"Due for review"** panel listing overdue SOPs and which incident types to
+select to likely — not guaranteed, since every scenario is freshly generated —
+exercise them again. A re-test therefore always has a new scenario surface
+while holding the underlying SOP constant, so it measures the principle, not
+memory of the last drill.
+
+Instructors get a **Retention** tab in the dashboard: a drill queue (who
+should re-drill what, most overdue first) and **cohort retention at 30/90
+days** — the share of re-encounters ≥30/≥90 days later that the trainee still
+handled competently. That metric is computed directly from recorded sessions,
+so it works retroactively over history recorded before this feature existed;
+a "Rebuild retention schedule from history" button backfills the schedule the
+same way. Anonymous sessions are never tracked for retention (there's no way
+to tell anonymous trainees apart).
 
 ## Notes
 

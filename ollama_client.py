@@ -40,7 +40,7 @@ MODEL = "qwen2.5:14b"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_KEEP_ALIVE = "30m"
 
-log = logging.getLogger("simulator.ollama")
+log = logging.getLogger("certus.ollama")
 
 # Rough chars-per-token for English prose. Only used to warn about num_ctx
 # overflow, not for anything load-bearing — deliberately conservative (real

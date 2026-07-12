@@ -23,7 +23,7 @@ import sys
 
 import retrieval
 
-log = logging.getLogger("simulator.build_index")
+log = logging.getLogger("certus.build_index")
 
 _INFER_SCHEMA = {
     "type": "object",
@@ -44,8 +44,8 @@ _INFER_SCHEMA = {
     "required": ["display_name", "incident_types"],
 }
 
-_INFER_SYSTEM = """You design training-scenario configuration for a security-incident
-simulator, given an organization's threat catalog.
+_INFER_SYSTEM = """You design training-scenario configuration for Certus, an
+operational readiness platform, given an organization's threat catalog.
 
 Propose incident-type categories a trainee could select (e.g. "Physical
 Security", "Cyber Security", "Workplace Violence" — whatever fits this

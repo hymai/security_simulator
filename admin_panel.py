@@ -6,12 +6,12 @@ upload or overwrite it from the same sidebar they train in, they could plant
 their own "SOP" (or read the real one via the upload form's file browser) and
 defeat the whole answer-key-isolation guarantee the app is built around. This
 is a shared-secret gate proportionate to a single-instructor local tool, not a
-full user/role system — see SIMULATOR_ADMIN_PASSWORD below.
+full user/role system — see CERTUS_ADMIN_PASSWORD below.
 
-Set SIMULATOR_ADMIN_PASSWORD in the environment before launching Streamlit to
+Set CERTUS_ADMIN_PASSWORD in the environment before launching Streamlit to
 enable this panel:
 
-    SIMULATOR_ADMIN_PASSWORD=letmein streamlit run security_simulator.py
+    CERTUS_ADMIN_PASSWORD=letmein streamlit run certus.py
 
 Without it, the admin section stays locked with no way in — there is no
 default password.
@@ -28,7 +28,7 @@ import corpus_config
 import instructor_dashboard
 import retrieval
 
-_PASSWORD_ENV = "SIMULATOR_ADMIN_PASSWORD"
+_PASSWORD_ENV = "CERTUS_ADMIN_PASSWORD"
 _PROFILE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 

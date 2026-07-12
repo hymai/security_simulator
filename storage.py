@@ -5,7 +5,7 @@ Optional local persistence of training sessions, for the instructor dashboard
 Why opt-in: the README's privacy promise has been "nothing is written to the
 server's filesystem." Persisting session records is a real change to that
 guarantee, not just an implementation detail, so it's gated behind the
-SIMULATOR_RECORD_SESSIONS environment variable (instructor sets it when
+CERTUS_RECORD_SESSIONS environment variable (instructor sets it when
 running a cohort where review is wanted) and, per session, a trainee-visible
 checkbox in the sidebar — never silently on.
 
@@ -24,7 +24,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-RECORDING_ENABLED = bool(os.environ.get("SIMULATOR_RECORD_SESSIONS"))
+RECORDING_ENABLED = bool(os.environ.get("CERTUS_RECORD_SESSIONS"))
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_DIR = os.path.join(_HERE, ".local")
@@ -62,6 +62,22 @@ CREATE TABLE IF NOT EXISTS grade_events (
     complete INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS retention_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile TEXT NOT NULL,
+    trainee_key TEXT NOT NULL,
+    trainee_display TEXT NOT NULL,
+    source TEXT NOT NULL,
+    easiness REAL NOT NULL,
+    interval_days REAL NOT NULL,
+    repetitions INTEGER NOT NULL,
+    last_quality INTEGER NOT NULL,
+    last_session_id INTEGER REFERENCES sessions(id),
+    last_reviewed_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    UNIQUE (profile, trainee_key, source)
+);
 """
 
 
@@ -82,7 +98,7 @@ def _conn():
         conn.close()
 
 
-# --- writes, called from security_simulator.py during a live session -------
+# --- writes, called from certus.py during a live session -------------------
 
 def start_session(profile: str, trainee: str, incident_types: list[str],
                   scenario_text: str) -> int:
@@ -172,6 +188,111 @@ def session_detail(session_id: int) -> dict:
         session["steps"] = steps
         session["events"] = events
         return session
+
+
+# --- retention state (spaced repetition), for retention.py ------------------
+#
+# retention_state is a materialized view, not a source of truth: it is fully
+# derivable from sessions/steps/grade_events by retention.rebuild_all(), so it
+# can be dropped and replayed at any time (e.g. after tuning SM-2 constants).
+# All SM-2 math lives in retention.py; this section is plain CRUD only.
+
+def normalize_trainee(name: str) -> str:
+    """Single place free-text trainee names become a matching key. Python
+    casefold, not SQL LOWER() — SQLite's LOWER is ASCII-only and names
+    aren't."""
+    return (name or "").strip().casefold()
+
+
+def upsert_retention_state(profile: str, trainee_key: str, trainee_display: str,
+                           source: str, easiness: float, interval_days: float,
+                           repetitions: int, quality: int, session_id: int,
+                           reviewed_at: str, due_at: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO retention_state (profile, trainee_key, trainee_display, "
+            "source, easiness, interval_days, repetitions, last_quality, "
+            "last_session_id, last_reviewed_at, due_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (profile, trainee_key, source) DO UPDATE SET "
+            "trainee_display = excluded.trainee_display, "
+            "easiness = excluded.easiness, "
+            "interval_days = excluded.interval_days, "
+            "repetitions = excluded.repetitions, "
+            "last_quality = excluded.last_quality, "
+            "last_session_id = excluded.last_session_id, "
+            "last_reviewed_at = excluded.last_reviewed_at, "
+            "due_at = excluded.due_at",
+            (profile, trainee_key, trainee_display, source, easiness,
+             interval_days, repetitions, quality, session_id, reviewed_at, due_at),
+        )
+
+
+def get_retention_states(profile: str, trainee_key: str) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM retention_state WHERE profile = ? AND trainee_key = ?",
+            (profile, trainee_key)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def due_retention_states(profile: str | None = None, trainee_key: str | None = None,
+                         as_of: str | None = None) -> list[dict]:
+    """Due/overdue rows, most overdue first. trainee_key=None spans all
+    trainees (instructor drill queue); a key scopes to one (sidebar panel).
+    ISO-8601 UTC timestamps compare correctly as text."""
+    query = "SELECT * FROM retention_state WHERE due_at <= ?"
+    params: list = [as_of or _now()]
+    if profile:
+        query += " AND profile = ?"
+        params.append(profile)
+    if trainee_key:
+        query += " AND trainee_key = ?"
+        params.append(trainee_key)
+    query += " ORDER BY due_at ASC"
+    with _conn() as c:
+        return [dict(r) for r in c.execute(query, params).fetchall()]
+
+
+def delete_retention_states(profile: str | None = None) -> None:
+    with _conn() as c:
+        if profile:
+            c.execute("DELETE FROM retention_state WHERE profile = ?", (profile,))
+        else:
+            c.execute("DELETE FROM retention_state")
+
+
+def sessions_citing_sources(profile: str, trainee_key: str | None = None) -> list[dict]:
+    """Every (session, step) row with its session's incident_types and the
+    step's sources, both still JSON-encoded — decoded by the caller in Python,
+    the same technique most_missed_sources uses. Feeds the 'which incident
+    types historically co-occur with this SOP source' suggestion."""
+    query = (
+        "SELECT se.id AS session_id, se.trainee, se.incident_types, st.sources "
+        "FROM steps st JOIN sessions se ON se.id = st.session_id "
+        "WHERE se.profile = ?"
+    )
+    params: list = [profile]
+    rows_out = []
+    with _conn() as c:
+        for r in c.execute(query, params).fetchall():
+            if trainee_key and normalize_trainee(r["trainee"]) != trainee_key:
+                continue
+            rows_out.append(dict(r))
+    return rows_out
+
+
+def completed_sessions(profile: str | None = None) -> list[dict]:
+    """Completed sessions in start order — the replay feed for
+    retention.rebuild_all()."""
+    query = "SELECT * FROM sessions WHERE completed_at IS NOT NULL"
+    params: tuple = ()
+    if profile:
+        query += " AND profile = ?"
+        params = (profile,)
+    query += " ORDER BY started_at ASC"
+    with _conn() as c:
+        return [dict(r) for r in c.execute(query, params).fetchall()]
 
 
 def most_missed_sources(profile: str | None = None, limit: int = 10) -> list[dict]:
