@@ -105,7 +105,7 @@ def generate_scenario(incident_types: list[str], profile: str = "default", on_to
     )
     result = ollama_chat(_SCENARIO_SYSTEM, user, _SCENARIO_SCHEMA,
                          temperature=0.8, num_ctx=NUM_CTX, on_token=on_token,
-                         model=SCENARIO_MODEL)
+                         model=SCENARIO_MODEL, keep_alive=0)
     result["text"] = _render_scenario(result)
     return result
 
