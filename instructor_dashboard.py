@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+import assessment
 import retention
 import storage
 
@@ -30,7 +31,8 @@ def _render_sessions_tab(profile: str | None) -> None:
     for s in sessions:
         status = "✅ complete" if s["completed_at"] else "⏳ in progress"
         total = s["total_steps"] if s["total_steps"] is not None else "?"
-        label = (f"{s['trainee']} — {s['started_at'][:19]} UTC — {status} "
+        badge = "📋 " if s.get("mode") == "assessment" else ""
+        label = (f"{badge}{s['trainee']} — {s['started_at'][:19]} UTC — {status} "
                 f"({s['steps_completed']}/{total} steps)")
         with st.expander(label):
             detail = storage.session_detail(s["id"])
@@ -71,6 +73,83 @@ def _render_most_missed_tab(profile: str | None) -> None:
     df["miss_rate"] = (df["miss_rate"] * 100).round(0).astype(int).astype(str) + "%"
     df.columns = ["SOP source", "first attempts", "missed", "miss rate"]
     st.dataframe(df, hide_index=True, width="stretch")
+
+    # The productized version of this tab: a standalone report to attach to a
+    # procedure-review ticket, framed at the document, not the trainee.
+    st.download_button(
+        "Download SOP-gap report (.md)",
+        assessment.sop_gap_report(profile),
+        file_name=f"sop_gap_report_{profile or 'all'}.md",
+        mime="text/markdown")
+
+
+def _render_assessments_tab(profile: str | None) -> None:
+    """Iteration 4's instructor surface: verdicts, audit-grade evidence
+    export, the cohort CSV, and the appeal/override path. Overrides never
+    mutate the machine verdict (storage.override_assessment) — both are
+    shown, and both land in the evidence export."""
+    sessions = [s for s in storage.list_sessions(profile)
+                if s.get("mode") == "assessment"]
+    if not sessions:
+        st.info("No assessments recorded yet. Trainees start one by choosing "
+                "'Assessment' as the session mode in the sidebar; per-profile "
+                "settings (threshold, attempts, time limit, mandate) live "
+                "under an 'assessment' key in the profile's config.json.")
+        return
+
+    rows = []
+    for s in sessions:
+        if s["score"] is not None:
+            eff = assessment.effective_passed(s)
+            verdict = "PASS ✅" if eff else "FAIL ❌"
+            if s.get("override_passed") is not None:
+                verdict += " (override)"
+            score = f"{s['score']:.0%}"
+        else:
+            verdict, score = "in progress", "—"
+        rows.append({"ID": s["id"], "Trainee": s["trainee"],
+                     "Started (UTC)": s["started_at"][:19],
+                     "Score": score, "Verdict": verdict})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.download_button(
+        "Download cohort results (.csv)", assessment.cohort_csv(sessions),
+        file_name=f"assessments_{profile or 'all'}.csv", mime="text/csv")
+
+    finished = [s for s in sessions if s["score"] is not None]
+    if not finished:
+        return
+    st.markdown("**Evidence & override**")
+    chosen = st.selectbox(
+        "Assessment", finished, key="assessment_evidence_pick",
+        format_func=lambda s: (f"#{s['id']} — {s['trainee']} — "
+                               f"{s['started_at'][:19]} UTC — {s['score']:.0%}"))
+    detail = storage.session_detail(chosen["id"])
+    st.download_button(
+        "Download evidence record (.md)",
+        assessment.evidence_markdown(detail, include_answers=True),
+        file_name=f"assessment_{chosen['id']}_{chosen['trainee']}.md",
+        mime="text/markdown", key=f"evidence_{chosen['id']}")
+
+    with st.expander("Override this verdict (appeal path)"):
+        st.caption(
+            "For when a review of the recorded answers shows the grader was "
+            "wrong (a false 'you missed this') or the trainee's deviation was "
+            "operationally sound. The machine verdict is kept and exported "
+            "alongside your override — a note is required.")
+        new_verdict = st.radio("Overridden verdict", ["PASS", "FAIL"],
+                               horizontal=True, key=f"ovr_v_{chosen['id']}")
+        note = st.text_area("Reason (required, appears in the evidence export)",
+                            key=f"ovr_n_{chosen['id']}")
+        if st.button("Record override", key=f"ovr_b_{chosen['id']}"):
+            if not note.strip():
+                st.warning("An override without a reason isn't auditable — "
+                           "add a note.")
+            else:
+                storage.override_assessment(chosen["id"], new_verdict == "PASS",
+                                            note)
+                st.success("Override recorded.")
+                st.rerun()
 
 
 def _render_retention_tab(profile: str | None) -> None:
@@ -152,10 +231,12 @@ def render() -> None:
     choice = st.selectbox("Profile", ["All"] + profiles, key="dashboard_profile_filter")
     selected_profile = None if choice == "All" else choice
 
-    tab_sessions, tab_missed, tab_retention = st.tabs(
-        ["Sessions", "Most-missed SOP steps", "Retention"])
+    tab_sessions, tab_assessments, tab_missed, tab_retention = st.tabs(
+        ["Sessions", "Assessments", "Most-missed SOP steps", "Retention"])
     with tab_sessions:
         _render_sessions_tab(selected_profile)
+    with tab_assessments:
+        _render_assessments_tab(selected_profile)
     with tab_missed:
         _render_most_missed_tab(selected_profile)
     with tab_retention:

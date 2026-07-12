@@ -3,7 +3,7 @@
 *A one-pager for Certus (formerly the security-simulator project, renamed to
 reflect the reframe below). (Updated July 2026 — reframed from "competence
 verification for security training" after a first-principles review;
-iterations 1–2 of the roadmap are shipped.)*
+iterations 1–4 of the roadmap are shipped — the Phase-1 MVP is feature-complete.)*
 
 ## The problem
 
@@ -48,7 +48,7 @@ Two things LLMs make possible for the first time:
 ## What exists today
 
 Certus is a fully local pipeline (Ollama + on-device embeddings — SOPs never
-leave the building), now with two full iterations shipped:
+leave the building), now with four full iterations shipped:
 
 - **Scenario generation** from a threat corpus; **answer key** derived from the
   SOP corpus, server-side only — it never reaches the browser, so trainees can't
@@ -64,6 +64,18 @@ leave the building), now with two full iterations shipped:
   grade events are stored in SQLite; instructors see per-trainee history and
   which SOP source documents are missed most *across* trainees — the seed of
   the SOP-gap flywheel described below.
+- **Retention engine**: SM-2 spaced repetition over each trainee's weak SOPs,
+  a due-for-review panel that steers incident-type selection (new scenario
+  surface, same underlying SOP), and the 30/90-day cohort retention metric.
+- **Assessment & compliance mode** (the monetization core): scored, no-hint
+  assessments with instructor-set pass thresholds, attempt limits, and timed
+  drills; per-assessment audit-grade evidence export (settings snapshot,
+  per-step coverage with SOP provenance, grading-integrity statement, SHA-256
+  tamper evidence — never the answer key itself); a cohort CSV for GRC
+  ingestion; a mandate field stamped into evidence (e.g. OSHA PSM, Joint
+  Commission EM); an instructor override/appeal path where the machine
+  verdict is preserved alongside the override; and the productized SOP-gap
+  report as a standalone export.
 
 The two remaining properties that make this defensible as more than a demo:
 answer-key isolation is enforced in code (corpus separation, ID-only grading
@@ -111,9 +123,9 @@ bottom on price — treat as later expansion, not the wedge.
   or reasonably deviate from the same step, the *document* gets flagged, not
   just the trainee. No competitor improves the customer's procedures as a
   byproduct of training on them.
-- **Certifiable assessment mode** (roadmap): the no-leak grading architecture
-  supports defensible competence certification — the thing an LMS completion
-  can't be.
+- **Certifiable assessment mode** (shipped): the no-leak grading architecture
+  now backs scored assessments with audit-grade, tamper-evident evidence
+  export — the thing an LMS completion can't be.
 - **Deployment spectrum**: fully local for the paranoid (today), managed cloud
   for everyone else (roadmap), same profile format either way.
 
@@ -125,14 +137,15 @@ bottom on price — treat as later expansion, not the wedge.
 2. ✅ **Instructor & analytics layer** — shipped. SQLite persistence, per-trainee
    history, most-missed-SOP tab. Next: per-step/per-team/trended resolution
    (readiness heatmap) and audit-grade export, both in iteration 4.
-3. **Retention engine** — spaced repetition on each trainee's weak steps at
-   expanding intervals; transfer variation (new scenario surface, same
-   underlying SOP) so re-tests measure the principle, not memory of the last
-   drill; retention data rolls up into the readiness heatmap.
-4. **Assessment & compliance mode** (priority raised) — the monetization core
-   under "sell proof, not practice": thresholds, timed drills, audit-grade
-   evidence export mapped to the mandate (fire safety, ISO 27001, HIPAA,
-   OSHA/PSM), certifiable assessment, and a productized SOP-gap report.
+3. ✅ **Retention engine** — shipped. SM-2 on each trainee's weak SOPs,
+   transfer variation (new scenario surface, same underlying SOP), and the
+   30/90-day cohort retention metric.
+4. ✅ **Assessment & compliance mode** — shipped. Thresholds, attempt limits,
+   timed drills, audit-grade evidence export with mandate stamping and
+   tamper-evident hashing, cohort CSV, instructor override (appeal path),
+   and the productized SOP-gap report. Remaining gap from iteration 2's
+   notes: the per-team/trended readiness heatmap (executive view) — folded
+   into iteration 5 alongside tabletop mode.
 5. **Dynamic scenarios & tabletop mode** — mid-scenario injects, difficulty
    knobs, multi-role team exercises; automates expensive consultant-led
    tabletops and is a natural team-tier upsell.
@@ -163,7 +176,13 @@ readiness heatmap the risk buyer actually wants.
 ## Trust prerequisite
 
 Before any pedagogy-led *or* compliance-led sales motion: grader calibration
-and a trainee appeal/override path. One false "you missed this" destroys
-learner trust in the whole approach — and once assessment results carry audit
-weight (iteration 4), a false negative has compliance consequences, not just
-trust ones. (Calibration seed already exists in `spike_grader.py`.)
+and an appeal/override path. One false "you missed this" destroys learner
+trust in the whole approach — and now that assessment results carry audit
+weight (iteration 4, shipped), a false negative has compliance consequences,
+not just trust ones. The **override path is shipped**: an instructor can
+review the recorded verbatim answers and override a verdict with a required
+note; the machine verdict is preserved alongside it in every evidence export.
+Grader calibration remains the open half — the seed exists in
+`spike_grader.py` (12/12 agreement on hand-written cases incl. injection
+variants), but a design partner's real answer corpus is what turns that into
+a calibration claim a compliance buyer can cite.

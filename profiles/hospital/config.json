@@ -4,5 +4,11 @@
     "Workplace Violence": "Code Gray, combative or violent person, Emergency Department waiting area, inpatient behavioral health unit, intoxication, psychiatric crisis, dispute over care decisions, threatening staff, throwing objects, leaving against medical advice while combative",
     "Facilities Management": "Code Red, fire in a patient care area, 3rd Floor Medical/Surgical unit, non-ambulatory patients, staged evacuation, horizontal defend-in-place, full building evacuation, up to 30 patients and 15 staff",
     "Hazardous Materials": "Chemical spill in the laboratory, reagent or cleaning chemical, Pathology Lab, fumes, slip/contact hazard, strong chemical odor, visible spill, activated fume-hood alarm, staff exposure, adjacent-area occupants exposure"
+  },
+  "assessment": {
+    "pass_threshold": 0.8,
+    "max_attempts_per_step": 2,
+    "time_limit_minutes": 30,
+    "mandate": "Joint Commission Emergency Management readiness (EM.14.01.01)"
   }
 }

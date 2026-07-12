@@ -92,6 +92,7 @@ the app's own source.
 | `admin_panel.py` | Password-gated sidebar: corpus upload + instructor dashboard |
 | `storage.py` | Optional local SQLite persistence of session records (opt-in, see below) |
 | `retention.py` | Spaced-repetition engine (SM-2) over recorded sessions — see below |
+| `assessment.py` | Assessment mode: settings, scoring, evidence export, SOP-gap report — see below |
 | `instructor_dashboard.py` | Per-trainee history, most-missed-SOP-step, and retention analytics |
 | `ollama_client.py` | Local Ollama chat client (streaming, JSON schema) |
 | `grading.py` | Grading prompt and leak-detection for hints |
@@ -155,6 +156,59 @@ so it works retroactively over history recorded before this feature existed;
 a "Rebuild retention schedule from history" button backfills the schedule the
 same way. Anonymous sessions are never tracked for retention (there's no way
 to tell anonymous trainees apart).
+
+## Assessment & compliance mode (opt-in, built on session recording)
+
+Training mode practices a procedure; **assessment mode measures it**. When
+session recording is enabled, the sidebar offers a mode choice. An assessment
+runs the same freshly-generated scenario and server-side answer key, but:
+
+- **No hints** — replies report coverage counts only ("2 of 3 actions
+  covered"), never what's missing. Clarifying questions about the scenario
+  are still free and don't count as attempts.
+- **Attempt limit** per step and an optional **time limit** for the whole
+  drill (the clock starts after the response plan is generated, so model
+  latency never eats the trainee's time).
+- **Pass threshold** — the score is the mean per-step coverage of expected
+  actions; steps never reached count as zero. Pass/fail is recorded.
+
+Settings are fixed per profile by the instructor (never chosen by the
+trainee) under an `assessment` key in `profiles/<name>/config.json`:
+
+```json
+"assessment": {
+  "pass_threshold": 0.8,
+  "max_attempts_per_step": 2,
+  "time_limit_minutes": 30,
+  "mandate": "OSHA PSM emergency response readiness (29 CFR 1910.119)"
+}
+```
+
+They are snapshotted onto the session row when the assessment starts, so
+editing the config later can't rewrite what a past verdict was judged
+against. An assessment requires a trainee name and recording turned on — the
+recorded answers *are* the evidence behind the verdict. After an assessment
+the model answer is **not** revealed (only which SOP documents to review);
+practicing happens in training mode, where every scenario is fresh anyway.
+
+The **Assessments** tab in the instructor dashboard adds:
+
+- **Audit-grade evidence export** per assessment (Markdown): settings and
+  mandate, scenario, per-step coverage with SOP provenance, verbatim
+  answers, verdicts, an embedded grading-integrity statement, and a SHA-256
+  of the record for tamper evidence. The expected-action text itself is
+  never included, so evidence can be shared without handing over an answer
+  bank. Trainees get their own copy (without verbatim answers) at the end
+  of the session.
+- **Cohort CSV** of all finished assessments, for GRC tools/spreadsheets.
+- **Instructor override (appeal path)** — if reviewing the recorded answers
+  shows the grader was wrong or a deviation was operationally sound, the
+  instructor can override the verdict with a required note. The machine
+  verdict is never mutated; both appear in every export.
+
+The **Most-missed SOP steps** tab now also exports a standalone **SOP-gap
+report** (Markdown) — the document-first framing of the same data, ready to
+attach to a procedure-review ticket.
 
 ## Notes
 

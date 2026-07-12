@@ -4,5 +4,11 @@
     "Physical Security": "unauthorized perimeter entry, intruder crossing the Zone 3 fence, tailgating",
     "Cyber Security": "intrusion into the SCADA OT control network, compromised engineering workstation, ransomware",
     "Facilities Management": "fire in an occupied building, Block B smoke detectors, loss of power or HVAC"
+  },
+  "assessment": {
+    "pass_threshold": 0.8,
+    "max_attempts_per_step": 2,
+    "time_limit_minutes": 30,
+    "mandate": "OSHA PSM emergency response readiness (29 CFR 1910.119)"
   }
 }

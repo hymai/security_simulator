@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS grade_events (
     created_at TEXT NOT NULL
 );
 
+-- Assessment-mode columns (iteration 4) live in _SESSION_COLUMNS below and are
+-- ALTER'd in by _migrate(), so a pre-assessment sessions.db upgrades in place.
+
 CREATE TABLE IF NOT EXISTS retention_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile TEXT NOT NULL,
@@ -81,8 +84,38 @@ CREATE TABLE IF NOT EXISTS retention_state (
 """
 
 
+# Columns added after the original schema shipped. Applied via ALTER TABLE on
+# every connection open (cheap: a PRAGMA read), so both a fresh DB and one
+# recorded before assessment mode existed end up with the same shape.
+#   mode      — 'training' (Socratic tutor) or 'assessment' (scored, no hints)
+#   score     — assessment only: mean per-step coverage fraction, 0.0-1.0
+#   passed    — assessment only: 1/0 verdict against the session's threshold
+#   settings  — assessment only: JSON snapshot of the settings the verdict was
+#               judged under (threshold, attempt/time limits, mandate) — stored
+#               per session so later config edits can't rewrite past evidence
+#   override_passed/override_note/override_at — instructor appeal path: the
+#               original verdict is never mutated; an override sits alongside
+#               it and both appear in the evidence export
+_SESSION_COLUMNS = {
+    "mode": "TEXT NOT NULL DEFAULT 'training'",
+    "score": "REAL",
+    "passed": "INTEGER",
+    "settings": "TEXT",
+    "override_passed": "INTEGER",
+    "override_note": "TEXT",
+    "override_at": "TEXT",
+}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate(conn) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    for col, decl in _SESSION_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
 
 
 @contextmanager
@@ -92,6 +125,7 @@ def _conn():
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         yield conn
         conn.commit()
     finally:
@@ -101,13 +135,15 @@ def _conn():
 # --- writes, called from certus.py during a live session -------------------
 
 def start_session(profile: str, trainee: str, incident_types: list[str],
-                  scenario_text: str) -> int:
+                  scenario_text: str, mode: str = "training",
+                  settings: dict | None = None) -> int:
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO sessions (profile, trainee, incident_types, scenario_text, "
-            "started_at) VALUES (?, ?, ?, ?, ?)",
+            "started_at, mode, settings) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (profile, trainee or "Anonymous", json.dumps(incident_types),
-             scenario_text, _now()),
+             scenario_text, _now(), mode,
+             json.dumps(settings) if settings else None),
         )
         return cur.lastrowid
 
@@ -143,6 +179,28 @@ def complete_session(session_id: int) -> None:
     with _conn() as c:
         c.execute("UPDATE sessions SET completed_at = ? WHERE id = ?",
                   (_now(), session_id))
+
+
+def finish_assessment(session_id: int, score: float, passed: bool) -> None:
+    """Close an assessment session with its verdict. Unlike training,
+    completed_at here means 'the assessment ended' (all steps exhausted or
+    time expired), not 'every step was fully covered'."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE sessions SET completed_at = ?, score = ?, passed = ? "
+            "WHERE id = ?", (_now(), score, int(passed), session_id))
+
+
+def override_assessment(session_id: int, passed: bool, note: str) -> None:
+    """Instructor appeal path. Deliberately additive: the machine verdict
+    (score/passed) is never rewritten — the override sits alongside it and
+    the evidence export shows both, so an audit trail can't be silently
+    cleaned up."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE sessions SET override_passed = ?, override_note = ?, "
+            "override_at = ? WHERE id = ?",
+            (int(passed), note.strip(), _now(), session_id))
 
 
 # --- reads, for instructor_dashboard.py -------------------------------------

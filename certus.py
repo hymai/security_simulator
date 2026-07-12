@@ -21,10 +21,12 @@ Run:  ollama serve            # in another terminal, with qwen2.5:14b pulled
 """
 
 import logging
+import time
 
 import streamlit as st
 
 import admin_panel
+import assessment
 import corpus_config
 import pipeline
 import retention
@@ -48,7 +50,8 @@ def warm_up(profile: str):
 def reset_session():
     for k in ("scenario", "steps", "current_step", "messages", "complete", "profile",
              "record_session", "trainee_name", "db_session_id", "attempt_counts",
-             "step_answers", "retention_updates"):
+             "step_answers", "retention_updates", "mode", "assessment_settings",
+             "deadline", "assessment_result"):
         st.session_state.pop(k, None)
     st.session_state.stage = 0
 
@@ -131,6 +134,119 @@ def build_reply(verdict: dict, steps: list) -> str:
     )
 
 
+def finalize_assessment(reason: str) -> str:
+    """Score the recorded events, persist the verdict, and compose the closing
+    message. The score is recomputed from the DB (assessment.score_session)
+    rather than from session_state so the persisted verdict is a pure function
+    of the recorded evidence — exactly what the export recomputes."""
+    settings = st.session_state.assessment_settings
+    detail = storage.session_detail(st.session_state.db_session_id)
+    result = assessment.score_session(detail)
+    passed = result["score"] >= settings["pass_threshold"]
+    storage.finish_assessment(st.session_state.db_session_id,
+                              result["score"], passed)
+    st.session_state.complete = True
+    st.session_state.assessment_result = {**result, "passed": passed,
+                                          "reason": reason}
+    # A failed assessment is still a genuine retrieval event — it feeds the
+    # same spaced-repetition schedule as training (and a fail schedules the
+    # SOP for early re-drill, which is the point). Never let a retention bug
+    # block the verdict.
+    try:
+        st.session_state.retention_updates = \
+            retention.update_from_session(st.session_state.db_session_id)
+    except Exception:
+        log.exception("retention update failed for session %s",
+                      st.session_state.db_session_id)
+    verdict = "**PASS** ✅" if passed else "**FAIL** ❌"
+    return (f"The assessment has ended ({reason}). "
+            f"Score: **{result['score']:.0%}** against a "
+            f"{settings['pass_threshold']:.0%} threshold — {verdict}. "
+            f"See the summary below.")
+
+
+def build_assessment_reply(verdict: dict, steps: list, attempt: int,
+                           max_attempts: int) -> str:
+    """Assessment counterpart of build_reply: coverage counts only, never a
+    hint (the model's nudge reply is deliberately discarded — in a scored
+    setting a hint is answer-key leakage). Advances on full coverage OR when
+    the attempt limit is spent; finishing the last step finalizes.
+
+    Step titles are NOT revealed mid-assessment, even after a step closes —
+    unlike training, a step can close while incomplete here, and its title
+    summarizes the expected response."""
+    if verdict["message_type"] == "question":
+        # Clarifying questions are free (they never reach grading storage) and
+        # the reply was already leak-checked in pipeline.grade_step.
+        return verdict["reply"]
+
+    covered = len(verdict["covered_ids"])
+    total = covered + len(verdict["missing_ids"])
+    if not verdict["complete"] and attempt < max_attempts:
+        return (f"Recorded — {covered} of {total} expected action(s) covered "
+                f"so far (attempt {attempt} of {max_attempts}). You may refine "
+                f"or extend your answer; no hints in assessment mode.")
+
+    idx = st.session_state.current_step
+    st.session_state.current_step += 1
+    n = len(steps)
+    status = ("all actions covered ✅" if verdict["complete"]
+              else f"{covered} of {total} covered — attempt limit reached")
+    if st.session_state.current_step >= n:
+        closing = finalize_assessment("all steps answered")
+        return f"Step {idx + 1} recorded: {status}. That was the last step. {closing}"
+    cue = steps[st.session_state.current_step].get("threat", "")
+    orient = f" This one responds to: *{cue}*." if cue else ""
+    return (f"Step {idx + 1} recorded: {status}. "
+            f"Now describe your actions for **Step {idx + 2}** of {n}.{orient}")
+
+
+def render_assessment_summary():
+    """End-of-assessment view. Unlike training, the model answer is NOT
+    revealed — an assessment produces a verdict and pointers to which SOPs to
+    review, and the trainee practices those in training mode (where every
+    scenario is fresh anyway)."""
+    res = st.session_state.assessment_result
+    settings = st.session_state.assessment_settings
+    if res["passed"]:
+        st.success(f"**PASS** — score {res['score']:.0%} "
+                   f"(threshold {settings['pass_threshold']:.0%})")
+    else:
+        st.error(f"**FAIL** — score {res['score']:.0%} "
+                 f"(threshold {settings['pass_threshold']:.0%})")
+    st.caption(f"Assessment ended: {res['reason']}. "
+               "Scores are per expected action, averaged over all steps.")
+
+    rows = [{"Step": f"{r['step']}. {r['title']}",
+             "Attempts": r["attempts"],
+             "Coverage": f"{r['covered']}/{r['total']} ({r['coverage']:.0%})",
+             "SOP sources": ", ".join(r["sources"]) or "—"}
+            for r in res["steps"]]
+    st.dataframe(rows, hide_index=True, width="stretch")
+
+    to_review = sorted({s for r in res["steps"] if r["coverage"] < 1.0
+                        for s in r["sources"]})
+    if to_review:
+        st.markdown("**SOPs to review before a re-take:** "
+                    + ", ".join(f"`{s}`" for s in to_review))
+        st.caption("The model answer isn't shown after an assessment — review "
+                   "the documents above, or run a training session (every "
+                   "scenario is freshly generated, so practicing can't leak "
+                   "a future assessment).")
+
+    record = assessment.evidence_markdown(
+        storage.session_detail(st.session_state.db_session_id))
+    st.download_button("Download assessment record (.md)", record,
+                       file_name="assessment_record.md", mime="text/markdown")
+    updates = st.session_state.get("retention_updates")
+    if updates:
+        st.caption("Next reviews: " + " · ".join(
+            f"{u['source']} in {u['interval_days']:.0f} day(s)" for u in updates))
+    if st.button("Start a new scenario"):
+        reset_session()
+        st.rerun()
+
+
 def render_summary_download(steps: list):
     """Training over: show a recap and offer the full record as a download.
 
@@ -194,7 +310,7 @@ if profiles:
     # every rerun, so the submit handler below still reads them as locals):
     # knowing who's training *before* incident-type selection is what lets
     # the due-for-review panel inform that selection.
-    trainee_name, record_session = "", False
+    trainee_name, record_session, mode = "", False, "training"
     if storage.RECORDING_ENABLED:
         st.sidebar.markdown("---")
         trainee_name = st.sidebar.text_input(
@@ -204,6 +320,26 @@ if profiles:
             help="The instructor for this site has enabled session review. "
                  "Uncheck to opt out — nothing about this session is then "
                  "stored on the server.")
+
+        # Assessment mode only exists where recording exists: a verdict with
+        # no recorded evidence behind it certifies nothing.
+        mode_label = st.sidebar.radio(
+            "Session mode",
+            ["Training — Socratic tutor", "Assessment — scored, no hints"],
+            help="Training coaches you step by step. Assessment measures you: "
+                 "limited attempts per step, optionally timed, no hints, and "
+                 "a pass/fail verdict recorded for the instructor. Settings "
+                 "are fixed per site profile by the instructor.")
+        if mode_label.startswith("Assessment"):
+            mode = "assessment"
+            a = assessment.load_settings(active_profile)
+            timing = (f"{a['time_limit_minutes']} min limit"
+                      if a["time_limit_minutes"] else "untimed")
+            mandate = f" · {a['mandate']}" if a["mandate"] else ""
+            st.sidebar.caption(
+                f"Pass ≥ {a['pass_threshold']:.0%} · "
+                f"{a['max_attempts_per_step']} attempt(s)/step · "
+                f"{timing}{mandate}")
 
         if record_session and trainee_name.strip():
             due = retention.due_for_review(active_profile, trainee_name)
@@ -233,9 +369,18 @@ if profiles:
         if st.form_submit_button("Generate Scenario"):
             if not selected:
                 st.sidebar.warning("Select at least one incident type.")
+            elif mode == "assessment" and (not record_session or not trainee_name.strip()):
+                st.sidebar.warning(
+                    "An assessment needs your name and session recording "
+                    "turned on — the recorded answers ARE the evidence behind "
+                    "the verdict. Use training mode to practice anonymously.")
             else:
                 reset_session()
                 st.session_state.profile = active_profile
+                st.session_state.mode = mode
+                if mode == "assessment":
+                    st.session_state.assessment_settings = \
+                        assessment.load_settings(active_profile)
                 st.session_state.scenario = run_with_progress(
                     "Generating scenario…", pipeline.generate_scenario, selected,
                     profile=active_profile)
@@ -246,7 +391,8 @@ if profiles:
                     st.session_state.trainee_name = trainee_name.strip() or "Anonymous"
                     st.session_state.db_session_id = storage.start_session(
                         active_profile, st.session_state.trainee_name, selected,
-                        st.session_state.scenario["text"])
+                        st.session_state.scenario["text"], mode=mode,
+                        settings=st.session_state.get("assessment_settings"))
 else:
     st.sidebar.info("No profiles yet — use Admin below to upload a corpus.")
 
@@ -265,7 +411,14 @@ if st.session_state.stage >= 1:
     st.markdown(render_scenario_display(st.session_state.scenario), unsafe_allow_html=True)
 
 if st.session_state.stage == 1:
-    if st.button("Generate response plan and begin training"):
+    is_assessment = st.session_state.get("mode") == "assessment"
+    begin_label = ("Generate response plan and begin assessment"
+                   if is_assessment else
+                   "Generate response plan and begin training")
+    if is_assessment and st.session_state.assessment_settings["time_limit_minutes"]:
+        st.caption(f"⏱ The {st.session_state.assessment_settings['time_limit_minutes']}-minute "
+                   "timer starts when the response plan is ready, not now.")
+    if st.button(begin_label):
         steps = run_with_progress(
             "Deriving the response plan (this is the slower stage — typically "
             "1-2 minutes on this model/hardware)…",
@@ -278,26 +431,53 @@ if st.session_state.stage == 1:
             storage.save_steps(st.session_state.db_session_id, steps)
         first_cue = steps[0].get("threat", "")
         first_orient = f" It responds to: *{first_cue}*." if first_cue else ""
-        st.session_state.messages = [{
-            "role": "assistant",
-            "content": (
+        if is_assessment:
+            a = st.session_state.assessment_settings
+            # Timer anchored here, after key generation — the model's 1-2
+            # minute derivation must not eat into the trainee's clock.
+            st.session_state.deadline = (
+                time.time() + a["time_limit_minutes"] * 60
+                if a["time_limit_minutes"] else None)
+            timing = (f" You have **{a['time_limit_minutes']} minutes**."
+                      if a["time_limit_minutes"] else "")
+            intro = (
+                f"This is a scored assessment: **{len(steps)} step(s)**, up to "
+                f"**{a['max_attempts_per_step']} graded attempt(s)** per step, "
+                f"pass at **{a['pass_threshold']:.0%}** coverage. No hints — "
+                f"but clarifying questions about the scenario are free and "
+                f"don't count as attempts.{timing} "
+                f"Describe the actions for each role in **Step 1**.{first_orient}"
+            )
+        else:
+            intro = (
                 f"I'm your trainer for today. This scenario has **{len(steps)} step(s)**. "
                 f"Give me the actions for each role in **Step 1** to begin —"
                 f" consider every stakeholder, not just one role.{first_orient}"
-            ),
-        }]
+            )
+        st.session_state.messages = [{"role": "assistant", "content": intro}]
         st.session_state.stage = 2
         st.rerun()
 
-# Stage 2: the Socratic tutoring loop (state machine lives here)
+# Stage 2: the tutoring/assessment loop (state machine lives here)
 if st.session_state.stage == 2:
     steps = st.session_state.steps
     n = len(steps)
+    is_assessment = st.session_state.get("mode") == "assessment"
+    deadline = st.session_state.get("deadline")
+
+    # Passive expiry check: catches a refresh/rerun after the clock ran out,
+    # so an expired assessment finalizes even if no further message is sent.
+    if is_assessment and deadline and not st.session_state.complete \
+            and time.time() > deadline:
+        st.session_state.messages.append(
+            {"role": "assistant", "content": finalize_assessment("time expired")})
 
     if not st.session_state.complete:
         current = steps[st.session_state.current_step]
         cue = current.get("threat", "")
         suffix = f" — responding to: {cue}" if cue else ""
+        if is_assessment and deadline:
+            suffix += f" · ⏱ {max(0.0, (deadline - time.time()) / 60):.0f} min left"
         st.info(f"Progress: **Step {st.session_state.current_step + 1} of {n}**{suffix}")
 
     for m in st.session_state.messages:
@@ -305,7 +485,10 @@ if st.session_state.stage == 2:
             st.markdown(m["content"])
 
     if st.session_state.complete:
-        render_summary_download(steps)
+        if is_assessment:
+            render_assessment_summary()
+        else:
+            render_summary_download(steps)
     elif prompt := st.chat_input("Describe the actions for the current step…"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -334,18 +517,27 @@ if st.session_state.stage == 2:
                         st.session_state.db_session_id, step_number, attempt, prompt,
                         verdict["covered_ids"], verdict["missing_ids"], verdict["complete"])
 
-            reply = build_reply(verdict, steps)
-            if st.session_state.complete and st.session_state.get("record_session"):
-                storage.complete_session(st.session_state.db_session_id)
-                # Advance spaced-repetition state for every SOP source this
-                # session actually exercised. Never let a retention bug block
-                # the trainee's completion — recording is strictly additive.
-                try:
-                    st.session_state.retention_updates = \
-                        retention.update_from_session(st.session_state.db_session_id)
-                except Exception:
-                    log.exception("retention update failed for session %s",
-                                  st.session_state.db_session_id)
+            if is_assessment:
+                # attempt_counts was just incremented in the recording block
+                # above (recording is mandatory in assessment mode), so this
+                # is the attempt the trainee is currently on.
+                attempt = st.session_state.get("attempt_counts", {}).get(step_number, 0)
+                reply = build_assessment_reply(
+                    verdict, steps, attempt,
+                    st.session_state.assessment_settings["max_attempts_per_step"])
+            else:
+                reply = build_reply(verdict, steps)
+                if st.session_state.complete and st.session_state.get("record_session"):
+                    storage.complete_session(st.session_state.db_session_id)
+                    # Advance spaced-repetition state for every SOP source this
+                    # session actually exercised. Never let a retention bug block
+                    # the trainee's completion — recording is strictly additive.
+                    try:
+                        st.session_state.retention_updates = \
+                            retention.update_from_session(st.session_state.db_session_id)
+                    except Exception:
+                        log.exception("retention update failed for session %s",
+                                      st.session_state.db_session_id)
             st.markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
         st.rerun()
