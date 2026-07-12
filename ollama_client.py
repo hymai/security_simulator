@@ -37,6 +37,7 @@ import urllib.error
 import urllib.request
 
 MODEL = "qwen2.5:14b"
+SCENARIO_MODEL = "mistral-nemo:12b"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_KEEP_ALIVE = "30m"
 
@@ -58,7 +59,7 @@ def _estimate_tokens(text: str) -> int:
 
 def ollama_chat(system: str, user: str, schema: dict, temperature: float,
                 num_ctx: int = 8192, on_token=None,
-                keep_alive: str = DEFAULT_KEEP_ALIVE) -> dict:
+                keep_alive: str = DEFAULT_KEEP_ALIVE, model: str = MODEL) -> dict:
     """Call the local model with a forced JSON schema; return parsed JSON.
 
     `schema` is passed as Ollama's `format` so the model must emit conforming
@@ -81,7 +82,7 @@ def ollama_chat(system: str, user: str, schema: dict, temperature: float,
                     "raise num_ctx or retrieve fewer chunks", est, num_ctx)
 
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

@@ -20,7 +20,7 @@ import logging
 import corpus_config
 import grading
 import retrieval
-from ollama_client import ollama_chat
+from ollama_client import SCENARIO_MODEL, ollama_chat
 
 log = logging.getLogger("certus.pipeline")
 
@@ -104,7 +104,8 @@ def generate_scenario(incident_types: list[str], profile: str = "default", on_to
         f"Reference material:\n{sources}"
     )
     result = ollama_chat(_SCENARIO_SYSTEM, user, _SCENARIO_SCHEMA,
-                         temperature=0.8, num_ctx=NUM_CTX, on_token=on_token)
+                         temperature=0.8, num_ctx=NUM_CTX, on_token=on_token,
+                         model=SCENARIO_MODEL)
     result["text"] = _render_scenario(result)
     return result
 
