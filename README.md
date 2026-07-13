@@ -8,7 +8,9 @@ without ever revealing the answer key.
 
 Runs entirely on-device via [Ollama](https://ollama.com) (`qwen2.5:14b`) and
 a local [BGE-M3](https://huggingface.co/BAAI/bge-m3) embedding index — no
-external API calls.
+external API calls. Alternatively, point it at any OpenAI-compatible endpoint
+(vLLM, LM Studio, llama.cpp server, OpenAI) — see "Model endpoints" below —
+or deploy on-prem with Docker Compose.
 
 ## How it works
 
@@ -98,7 +100,9 @@ the app's own source.
 | `grading.py` | Grading prompt and leak-detection for hints |
 | `calibrate_cutoff.py` | Script used to measure retrieval similarity cutoffs |
 | `spike_grader.py` | Standalone grading spike/prototype |
-| `profiles/<name>/config.json` | Display name + incident-type -> retrieval-query map |
+| `tests/headless_checks.py` | End-to-end checks of the real app with the model layer faked (no Ollama needed) |
+| `Dockerfile` / `docker-compose.yml` | On-prem container deploy (app + Ollama sidecar) |
+| `profiles/<name>/config.json` | Display name, incident types, language, assessment settings |
 | `profiles/<name>/data/threats/` | That profile's threat catalog and site security measures |
 | `profiles/<name>/data/sops/` | That profile's Standard Operating Procedures corpus |
 | `.index/<name>/` | Built embedding indices per profile (gitignored, rebuilt on demand) |
@@ -209,6 +213,81 @@ The **Assessments** tab in the instructor dashboard adds:
 The **Most-missed SOP steps** tab now also exports a standalone **SOP-gap
 report** (Markdown) — the document-first framing of the same data, ready to
 attach to a procedure-review ticket.
+
+## Difficulty, injects & tabletop mode
+
+- **Advanced difficulty** (checkbox in training; set per profile for
+  assessments via the `assessment.difficulty` config key): more concurrent
+  threats, at least one deliberate diversion, deliberately ambiguous sensor
+  information — plus a **mid-scenario inject**: a development generated
+  together with the scenario but hidden from the trainee until they cross
+  the midpoint step ("⚡ Development — the situation has changed…"). Because
+  the answer key is derived from scenario + inject together (with inject
+  steps pinned to the second half), answer-key isolation is unchanged and
+  nothing is ever graded before it has been revealed.
+- **Tabletop team drills**: enter participant names in the sidebar to run a
+  facilitated group exercise on one screen — the intro addresses the team,
+  each participant answers for their own role, and the session (and its
+  retention schedule) is recorded under the team's collective name.
+  Assessments stay individual: they certify people, not rooms.
+
+## Readiness heatmap
+
+The instructor dashboard's **Readiness** tab is the executive view: latest
+observed competence per trainee × SOP document (🟢 ready · 🟡 shaky · 🔴 at
+risk · ⚪ unknown — last observation over 90 days old, because an old green
+is not a current green), plus per-procedure "trainees ready" counts, worst
+first. Derived at read time from recorded drills and assessments.
+
+## Model endpoints
+
+Ollama on localhost is the default. Two environment overrides:
+
+```bash
+# Remote/containerized Ollama:
+CERTUS_OLLAMA_URL=http://ollama:11434/api/chat
+
+# Any OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server, OpenAI):
+CERTUS_OPENAI_BASE_URL=http://localhost:8000/v1
+CERTUS_OPENAI_MODEL=Qwen/Qwen2.5-14B-Instruct
+CERTUS_OPENAI_SCENARIO_MODEL=...   # optional; defaults to CERTUS_OPENAI_MODEL
+CERTUS_OPENAI_API_KEY=...          # optional; most local servers need none
+```
+
+The OpenAI path requests `response_format: json_schema` and falls back to
+`json_object` with the schema stated in the prompt if the server rejects it.
+
+## Docker deploy (on-prem)
+
+```bash
+docker compose up -d --build
+docker compose exec ollama ollama pull qwen2.5:14b
+docker compose exec ollama ollama pull mistral-nemo:12b
+# open http://localhost:8501
+```
+
+Profiles are bind-mounted from `./profiles`; indices, session records, the
+embedding-model cache, and pulled models live in named volumes — nothing
+leaves the machine. Enable recording/admin via the commented environment
+variables in `docker-compose.yml`.
+
+## Language
+
+Set `"language": "Nederlands"` (or any language) in a profile's
+`config.json` to get scenarios, answer keys, and tutor replies in that
+language. SOPs and threat catalogs can already be in any language — BGE-M3
+embeddings are multilingual. English profiles use the original, validated
+prompts unchanged.
+
+## Testing
+
+```bash
+.venv/bin/python tests/headless_checks.py
+```
+
+Drives the real app end-to-end (assessment flow, attempt limits, verdicts,
+evidence export, override, injects, tabletop, readiness) with the model
+layer faked — no Ollama or browser required.
 
 ## Notes
 

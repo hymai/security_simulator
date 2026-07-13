@@ -220,6 +220,50 @@ def retention_metrics(profile: str | None = None) -> dict:
             "per_source": sorted(per_source.values(), key=lambda r: -r["n30"])}
 
 
+def readiness_matrix(profile: str | None = None, stale_days: int = 90) -> dict:
+    """The executive heatmap: latest observed quality per (trainee, SOP source),
+    derived at read time from completed sessions (training AND assessment both
+    count — each is a real retrieval event).
+
+    Each cell: {"quality": 0-5, "observed_at": iso, "stale": bool}. `stale`
+    means the last observation is older than `stale_days` — the honest
+    executive read is then "unknown", not the old score; memory decays and
+    that decay is the product's whole thesis.
+
+    Returns {"trainees": [display...], "sources": [...], "cells": {(display,
+    source): cell}, "source_summary": {source: {"ready": n, "total": n}}}.
+    """
+    latest: dict[tuple[str, str], dict] = {}
+    display_by_key: dict[str, str] = {}
+    for s in storage.completed_sessions(profile):
+        key = _trackable_key(s["trainee"])
+        if key is None:
+            continue
+        display_by_key[key] = s["trainee"].strip()
+        detail = storage.session_detail(s["id"])
+        for source, q in session_source_qualities(detail["steps"], detail["events"]).items():
+            latest[(key, source)] = {"quality": q, "observed_at": s["started_at"]}
+
+    now = _utcnow()
+    cells: dict[tuple[str, str], dict] = {}
+    source_summary: dict[str, dict] = {}
+    for (key, source), cell in latest.items():
+        age = (now - datetime.fromisoformat(cell["observed_at"])).days
+        cell = {**cell, "stale": age > stale_days}
+        cells[(display_by_key[key], source)] = cell
+        entry = source_summary.setdefault(source, {"ready": 0, "total": 0})
+        entry["total"] += 1
+        if not cell["stale"] and cell["quality"] >= RETAINED_QUALITY:
+            entry["ready"] += 1
+
+    return {
+        "trainees": sorted({t for t, _ in cells}),
+        "sources": sorted({s for _, s in cells}),
+        "cells": cells,
+        "source_summary": source_summary,
+    }
+
+
 def _loads(text: str) -> list:
     try:
         return json.loads(text) or []

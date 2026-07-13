@@ -51,9 +51,39 @@ def reset_session():
     for k in ("scenario", "steps", "current_step", "messages", "complete", "profile",
              "record_session", "trainee_name", "db_session_id", "attempt_counts",
              "step_answers", "retention_updates", "mode", "assessment_settings",
-             "deadline", "assessment_result"):
+             "deadline", "assessment_result", "inject_revealed", "team_names"):
         st.session_state.pop(k, None)
     st.session_state.stage = 0
+
+
+def inject_reveal_if_due(steps: list) -> str:
+    """Advanced difficulty: reveal the hidden mid-scenario inject once the
+    trainee crosses the midpoint step. Returns markdown to append to the
+    current reply (empty when there's no inject or it's already out).
+
+    The answer key was derived from scenario + inject with inject steps pinned
+    to the second half (pipeline.generate_answer_key), so nothing is graded
+    before it's been revealed."""
+    inject = (st.session_state.scenario.get("inject") or "").strip()
+    if not inject or st.session_state.get("inject_revealed"):
+        return ""
+    if st.session_state.current_step >= max(1, len(steps) // 2):
+        st.session_state.inject_revealed = True
+        return f"\n\n⚡ **Development** — the situation has changed: {inject}"
+    return ""
+
+
+def grading_context() -> str:
+    """Scenario text the grader sees this turn: includes the inject only once
+    the trainee has seen it too, so the grader never judges references to a
+    development the trainee couldn't know about (and vice versa)."""
+    scenario = st.session_state.scenario
+    text = scenario.get("scenario", "") or scenario.get("text", "")
+    if st.session_state.get("inject_revealed"):
+        inject = (scenario.get("inject") or "").strip()
+        if inject:
+            text += f"\n\nLater development (already announced): {inject}"
+    return text
 
 
 def run_with_progress(label: str, fn, *args, **kwargs):
@@ -131,6 +161,7 @@ def build_reply(verdict: dict, steps: list) -> str:
     return (
         f"✅ Step {idx + 1} — *{done['title']}* — complete. "
         f"Now give me the actions for **Step {idx + 2}**.{orient}"
+        f"{inject_reveal_if_due(steps)}"
     )
 
 
@@ -198,7 +229,8 @@ def build_assessment_reply(verdict: dict, steps: list, attempt: int,
     cue = steps[st.session_state.current_step].get("threat", "")
     orient = f" This one responds to: *{cue}*." if cue else ""
     return (f"Step {idx + 1} recorded: {status}. "
-            f"Now describe your actions for **Step {idx + 2}** of {n}.{orient}")
+            f"Now describe your actions for **Step {idx + 2}** of {n}.{orient}"
+            f"{inject_reveal_if_due(steps)}")
 
 
 def render_assessment_summary():
@@ -253,7 +285,12 @@ def render_summary_download(steps: list):
     The answer key is revealed only here, after completion — never mid-session,
     and never written to the server's filesystem (in-memory download only)."""
     st.success("Training complete. Here is the model answer with sources.")
-    lines = [f"# Training record\n\n## Scenario\n\n{st.session_state.scenario['text']}\n\n## Model answer\n"]
+    team = st.session_state.get("team_names") or []
+    participants = f"\n**Participants**: {', '.join(team)}\n" if team else ""
+    inject = (st.session_state.scenario.get("inject") or "").strip()
+    inject_line = f"\n**Mid-drill development**: {inject}\n" if inject else ""
+    lines = [f"# Training record\n{participants}{inject_line}\n"
+             f"## Scenario\n\n{st.session_state.scenario['text']}\n\n## Model answer\n"]
     for step in steps:
         srcs = ", ".join(step["sources"]) or "—"
         lines.append(f"\n### Step {step['step']}: {step['title']}  _(sources: {srcs})_")
@@ -310,7 +347,7 @@ if profiles:
     # every rerun, so the submit handler below still reads them as locals):
     # knowing who's training *before* incident-type selection is what lets
     # the due-for-review panel inform that selection.
-    trainee_name, record_session, mode = "", False, "training"
+    trainee_name, record_session, mode, difficulty = "", False, "training", "standard"
     if storage.RECORDING_ENABLED:
         st.sidebar.markdown("---")
         trainee_name = st.sidebar.text_input(
@@ -333,13 +370,18 @@ if profiles:
         if mode_label.startswith("Assessment"):
             mode = "assessment"
             a = assessment.load_settings(active_profile)
+            # Difficulty is instructor-fixed for assessments (config.json),
+            # same principle as the pass threshold: the trainee doesn't pick
+            # their own bar.
+            difficulty = a["difficulty"]
             timing = (f"{a['time_limit_minutes']} min limit"
                       if a["time_limit_minutes"] else "untimed")
             mandate = f" · {a['mandate']}" if a["mandate"] else ""
+            diff = " · advanced difficulty" if difficulty == "advanced" else ""
             st.sidebar.caption(
                 f"Pass ≥ {a['pass_threshold']:.0%} · "
                 f"{a['max_attempts_per_step']} attempt(s)/step · "
-                f"{timing}{mandate}")
+                f"{timing}{diff}{mandate}")
 
         if record_session and trainee_name.strip():
             due = retention.due_for_review(active_profile, trainee_name)
@@ -362,6 +404,24 @@ if profiles:
                     if suggested and st.button("Use suggested types"):
                         st.session_state[f"types_{active_profile}"] = suggested
 
+    team_members: list[str] = []
+    if mode == "training":
+        # Both are training-only: assessment difficulty is instructor-fixed
+        # above, and assessments certify individuals, not rooms.
+        difficulty = "advanced" if st.sidebar.checkbox(
+            "Advanced difficulty",
+            help="Harder scenario: more concurrent threats, at least one "
+                 "deliberate diversion, ambiguous sensor information — plus "
+                 "a surprise development revealed partway through the drill "
+                 "(a mid-scenario inject).") else "standard"
+        team_raw = st.sidebar.text_input(
+            "Tabletop team (optional) — participant names, comma-separated",
+            help="Runs the drill as a facilitated team exercise on one "
+                 "screen: the group answers each step together, every "
+                 "participant covering their own role's actions. If session "
+                 "recording is on, it's recorded under the team's name.")
+        team_members = [n.strip() for n in team_raw.split(",") if n.strip()]
+
     with st.sidebar.form("generate_form"):
         selected = st.multiselect("Incident type(s)", incident_types,
                                   key=f"types_{active_profile}")
@@ -378,21 +438,29 @@ if profiles:
                 reset_session()
                 st.session_state.profile = active_profile
                 st.session_state.mode = mode
+                st.session_state.team_names = team_members
                 if mode == "assessment":
                     st.session_state.assessment_settings = \
                         assessment.load_settings(active_profile)
                 st.session_state.scenario = run_with_progress(
                     "Generating scenario…", pipeline.generate_scenario, selected,
-                    profile=active_profile)
+                    profile=active_profile, difficulty=difficulty)
                 st.session_state.stage = 1
 
                 st.session_state.record_session = storage.RECORDING_ENABLED and record_session
                 if st.session_state.record_session:
-                    st.session_state.trainee_name = trainee_name.strip() or "Anonymous"
+                    # A tabletop drill is recorded under the team's collective
+                    # name — retention then tracks the team as a unit, which
+                    # is the honest granularity for a group exercise.
+                    if team_members:
+                        st.session_state.trainee_name = "Team: " + ", ".join(team_members)
+                    else:
+                        st.session_state.trainee_name = trainee_name.strip() or "Anonymous"
                     st.session_state.db_session_id = storage.start_session(
                         active_profile, st.session_state.trainee_name, selected,
                         st.session_state.scenario["text"], mode=mode,
-                        settings=st.session_state.get("assessment_settings"))
+                        settings=(st.session_state.get("assessment_settings")
+                                  or {"difficulty": difficulty}))
 else:
     st.sidebar.info("No profiles yet — use Admin below to upload a corpus.")
 
@@ -448,12 +516,26 @@ if st.session_state.stage == 1:
                 f"don't count as attempts.{timing} "
                 f"Describe the actions for each role in **Step 1**.{first_orient}"
             )
+        elif team := st.session_state.get("team_names"):
+            intro = (
+                f"This is a facilitated tabletop drill for **{', '.join(team)}** "
+                f"— **{len(steps)} step(s)**. For each step, discuss as a team "
+                f"and submit one combined answer, each participant giving the "
+                f"actions for their own role. Start with **Step 1**.{first_orient}"
+            )
         else:
             intro = (
                 f"I'm your trainer for today. This scenario has **{len(steps)} step(s)**. "
                 f"Give me the actions for each role in **Step 1** to begin —"
                 f" consider every stakeholder, not just one role.{first_orient}"
             )
+        # Degenerate case: a single-step key never crosses a "midpoint", so a
+        # hidden inject would otherwise stay hidden while still being graded —
+        # reveal it up front instead.
+        inject = (st.session_state.scenario.get("inject") or "").strip()
+        if inject and len(steps) < 2:
+            st.session_state.inject_revealed = True
+            intro += f"\n\n⚡ **Development** — the situation has changed: {inject}"
         st.session_state.messages = [{"role": "assistant", "content": intro}]
         st.session_state.stage = 2
         st.rerun()
@@ -498,11 +580,12 @@ if st.session_state.stage == 2:
         step_number = step["step"]
         step_answers = st.session_state.setdefault("step_answers", {})
         prior_answer = "\n".join(step_answers.get(step_number, []))
-        scenario_text = (st.session_state.scenario.get("scenario", "")
-                        or st.session_state.scenario.get("text", ""))
+        scenario_text = grading_context()
 
         with st.chat_message("assistant"), st.spinner("Thinking…"):
-            verdict = pipeline.grade_step(step, scenario_text, prior_answer, prompt)
+            language = corpus_config.load_config(st.session_state.profile)["language"]
+            verdict = pipeline.grade_step(step, scenario_text, prior_answer, prompt,
+                                          language=language)
 
             # Only a genuine answer attempt adds to what's graded next turn —
             # a clarifying question contributes no coverage (see grading.py).

@@ -15,6 +15,7 @@ step drew from; we map those back to filenames. The model never reproduces a
 filename, so it can't hallucinate one.
 """
 
+import json
 import logging
 
 import corpus_config
@@ -35,6 +36,15 @@ log = logging.getLogger("certus.pipeline")
 RETRIEVAL_CUTOFF: float | None = None
 RETRIEVAL_K = 6
 NUM_CTX = 8192
+
+
+def _language_rule(language: str, what: str) -> str:
+    """Prompt amendment for non-English profiles (config.json "language").
+    Deliberately returns "" for English so the default-language prompts —
+    including the spike-validated grading SYSTEM — stay byte-identical."""
+    if not language or language.strip().lower() == "english":
+        return ""
+    return f"\n\nWrite {what} in {language}."
 
 # Incident-type checkboxes and their threat-catalog retrieval vocabulary are
 # per-profile config (profiles/<profile>/config.json), not hardcoded here —
@@ -85,28 +95,66 @@ Rules:
 
 Return only JSON."""
 
+# Appended for difficulty="advanced". The inject is a mid-response development:
+# it is kept OUT of the scenario text shown to the trainee and revealed by the
+# UI partway through the drill (see certus.py). The answer key is derived from
+# scenario + inject together, so the key already covers it — answer-key
+# isolation is unchanged (this prompt still never sees the SOP corpus).
+_ADVANCED_RULES = """
 
-def generate_scenario(incident_types: list[str], profile: str = "default", on_token=None) -> dict:
+This is an ADVANCED-difficulty scenario. Additional rules:
+- Choose three or four concrete threats, and make at least one of them a
+  deliberate diversion from another.
+- Sensor and camera information may be fragmentary, delayed, or partially
+  contradictory — as real control-room information is.
+- Also write `inject`: one later development that occurs WHILE the response is
+  underway, escalating or complicating one of the chosen threats. Under 40
+  words. Same rules as the scenario: describe only what happens or what is
+  observed, never any response action. The scenario text itself must not
+  mention or foreshadow the inject."""
+
+
+def generate_scenario(incident_types: list[str], profile: str = "default",
+                      difficulty: str = "standard", on_token=None) -> dict:
     """Stage 1. Retrieve from the threats corpus and write a scenario.
+
+    `difficulty` is "standard" (2-3 threats, no inject) or "advanced" (3-4
+    threats incl. a diversion, ambiguous sensor picture, plus a hidden
+    mid-drill `inject` — revealed to the trainee only partway through the
+    response, see certus.py).
 
     `on_token(count, elapsed_s)`, if given, is called as the model streams —
     see ollama_client.ollama_chat. Generation is ~6 tok/s on this model/
     hardware (measured), so this is for progress display, not speed.
     """
-    type_query = corpus_config.load_config(profile)["incident_types"]
+    config = corpus_config.load_config(profile)
+    type_query = config["incident_types"]
     query = "; ".join(type_query[t] for t in incident_types if t in type_query)
     index = retrieval.load_index(profile, "threats")
     hits = retrieval.search(index, query, k=RETRIEVAL_K, cutoff=RETRIEVAL_CUTOFF)
+
+    advanced = difficulty == "advanced"
+    system = (_SCENARIO_SYSTEM + (_ADVANCED_RULES if advanced else "")
+              + _language_rule(config["language"],
+                               "every scenario field (and the inject, if any)"))
+    schema = _SCENARIO_SCHEMA
+    if advanced:
+        schema = json.loads(json.dumps(_SCENARIO_SCHEMA))  # deep copy
+        schema["properties"]["inject"] = {"type": "string"}
+        schema["required"] = schema["required"] + ["inject"]
 
     sources = _label_sources(hits)
     user = (
         f"Selected incident types: {', '.join(incident_types)}\n\n"
         f"Reference material:\n{sources}"
     )
-    result = ollama_chat(_SCENARIO_SYSTEM, user, _SCENARIO_SCHEMA,
+    result = ollama_chat(system, user, schema,
                          temperature=0.8, num_ctx=NUM_CTX, on_token=on_token,
                          model=SCENARIO_MODEL, keep_alive=0)
-    result["text"] = _render_scenario(result)
+    result["difficulty"] = difficulty
+    if not advanced:
+        result.pop("inject", None)
+    result["text"] = _render_scenario(result)  # never includes the inject
     return result
 
 
@@ -200,15 +248,30 @@ def generate_answer_key(scenario: dict, profile: str = "default", on_token=None)
     matters most here.
     """
     scenario_text = scenario.get("scenario", "") or scenario.get("text", "")
+    # The inject (advanced difficulty) is part of the situation the key must
+    # cover, even though the trainee won't see it until mid-drill: include it
+    # in retrieval and in the prompt, and pin its steps to the second half so
+    # the trainee is never graded on a development not yet revealed.
+    inject = (scenario.get("inject") or "").strip()
+    key_situation = scenario_text
+    system = _KEY_SYSTEM + _language_rule(
+        corpus_config.load_config(profile)["language"],
+        "every step title, threat cue, and action")
+    if inject:
+        key_situation = (f"{scenario_text}\n\nLater development (occurs while "
+                         f"the response is underway): {inject}")
+        system += ("\n\nThe 'later development' happens mid-response: any step "
+                   "responding to it must come in the SECOND HALF of the step "
+                   "list, after the immediate response to the initial scenario.")
     index = retrieval.load_index(profile, "sops")
-    hits = retrieval.search(index, scenario_text, k=RETRIEVAL_K, cutoff=RETRIEVAL_CUTOFF)
+    hits = retrieval.search(index, key_situation, k=RETRIEVAL_K, cutoff=RETRIEVAL_CUTOFF)
 
     label_to_source = {f"S{i}": h["source"] for i, h in enumerate(hits, 1)}
     user = (
-        f"Scenario:\n{scenario_text}\n\n"
+        f"Scenario:\n{key_situation}\n\n"
         f"Sources:\n{_label_sources(hits)}"
     )
-    raw = ollama_chat(_KEY_SYSTEM, user, _KEY_SCHEMA, temperature=0, num_ctx=NUM_CTX,
+    raw = ollama_chat(system, user, _KEY_SCHEMA, temperature=0, num_ctx=NUM_CTX,
                       on_token=on_token)
 
     steps = []
@@ -237,7 +300,8 @@ def generate_answer_key(scenario: dict, profile: str = "default", on_token=None)
 
 # --- Stage 3: grading ------------------------------------------------------
 
-def grade_step(step: dict, scenario_text: str, prior_answer: str, new_message: str) -> dict:
+def grade_step(step: dict, scenario_text: str, prior_answer: str, new_message: str,
+               language: str = "English") -> dict:
     """Stage 3. Grade one turn of one step, or answer a clarifying question.
 
     Grades against EVERYTHING the trainee has said for this step so far
@@ -256,7 +320,8 @@ def grade_step(step: dict, scenario_text: str, prior_answer: str, new_message: s
     user = grading.build_user_prompt(
         step["step"], step["title"], step["actions"], scenario_text,
         prior_answer, new_message)
-    result = ollama_chat(grading.SYSTEM, user, grading.SCHEMA, temperature=0, num_ctx=NUM_CTX)
+    system = grading.SYSTEM + _language_rule(language, "your reply")
+    result = ollama_chat(system, user, grading.SCHEMA, temperature=0, num_ctx=NUM_CTX)
 
     message_type = result.get("message_type", "answer_attempt")
     covered = set(result.get("covered_action_ids", [])) & all_ids   # discard hallucinated ids

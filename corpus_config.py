@@ -31,6 +31,10 @@ def load_config(profile: str) -> dict:
         config = json.load(f)
     config.setdefault("display_name", profile)
     config.setdefault("incident_types", {})
+    # Scenario/tutoring output language (the SOP corpus itself can be in any
+    # language — BGE-M3 embeddings are multilingual). "English" is the noop
+    # default: prompts are only amended for other values (see pipeline.py).
+    config.setdefault("language", "English")
     return config
 
 

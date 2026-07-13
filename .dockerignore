@@ -1,0 +1,8 @@
+.venv/
+.git/
+.index/
+.local/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/

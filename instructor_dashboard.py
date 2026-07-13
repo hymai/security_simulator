@@ -152,6 +152,46 @@ def _render_assessments_tab(profile: str | None) -> None:
                 st.rerun()
 
 
+def _render_readiness_tab(profile: str | None) -> None:
+    """The executive view: which procedures, on which people, would fail
+    tonight. Emoji cells rather than CSS so it renders identically in light/
+    dark themes and pastes cleanly into a report."""
+    st.caption(
+        "Latest observed competence per trainee and SOP document, from "
+        "recorded drills and assessments. 🟢 ready (clean or near-clean last "
+        "drill) · 🟡 shaky (heavy prompting) · 🔴 at risk (couldn't complete) "
+        "· ⚪ unknown (last observation > 90 days old — memory decays, so an "
+        "old green is not a current green).")
+    matrix = retention.readiness_matrix(profile)
+    if not matrix["trainees"]:
+        st.info("No completed recorded sessions with named trainees yet.")
+        return
+
+    def cell_icon(cell):
+        if cell is None:
+            return ""
+        if cell["stale"]:
+            return "⚪"
+        q = cell["quality"]
+        return "🟢" if q >= 4 else ("🟡" if q == 3 else "🔴")
+
+    rows = []
+    for trainee in matrix["trainees"]:
+        row = {"Trainee": trainee}
+        for source in matrix["sources"]:
+            row[source] = cell_icon(matrix["cells"].get((trainee, source)))
+        rows.append(row)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    summary = [{"SOP document": src,
+                "trainees ready": f"{v['ready']}/{v['total']}",
+                "ready %": f"{100 * v['ready'] / v['total']:.0f}%"}
+               for src, v in sorted(matrix["source_summary"].items(),
+                                    key=lambda kv: kv[1]["ready"] / kv[1]["total"])]
+    st.markdown("**Per-procedure readiness** (worst first)")
+    st.dataframe(pd.DataFrame(summary), hide_index=True, width="stretch")
+
+
 def _render_retention_tab(profile: str | None) -> None:
     # 1. Drill queue — the local-first nudge: who should re-drill what, now.
     st.markdown("**Drill queue** — trainees with SOPs due for re-drilling")
@@ -231,12 +271,15 @@ def render() -> None:
     choice = st.selectbox("Profile", ["All"] + profiles, key="dashboard_profile_filter")
     selected_profile = None if choice == "All" else choice
 
-    tab_sessions, tab_assessments, tab_missed, tab_retention = st.tabs(
-        ["Sessions", "Assessments", "Most-missed SOP steps", "Retention"])
+    tab_sessions, tab_assessments, tab_readiness, tab_missed, tab_retention = \
+        st.tabs(["Sessions", "Assessments", "Readiness", "Most-missed SOP steps",
+                 "Retention"])
     with tab_sessions:
         _render_sessions_tab(selected_profile)
     with tab_assessments:
         _render_assessments_tab(selected_profile)
+    with tab_readiness:
+        _render_readiness_tab(selected_profile)
     with tab_missed:
         _render_most_missed_tab(selected_profile)
     with tab_retention:

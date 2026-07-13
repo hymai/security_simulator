@@ -2,8 +2,11 @@
 
 *A one-pager for Certus (formerly the security-simulator project, renamed to
 reflect the reframe below). (Updated July 2026 — reframed from "competence
-verification for security training" after a first-principles review;
-iterations 1–4 of the roadmap are shipped — the Phase-1 MVP is feature-complete.)*
+verification for security training" after a first-principles review. All six
+iterations of the product ladder are shipped; what remains is Phase-2/3
+work that needs customers or cloud infrastructure: doc-system connectors,
+managed-cloud tier, embed API, and grader calibration on a design partner's
+real answer corpus.)*
 
 ## The problem
 
@@ -47,8 +50,9 @@ Two things LLMs make possible for the first time:
 
 ## What exists today
 
-Certus is a fully local pipeline (Ollama + on-device embeddings — SOPs never
-leave the building), now with four full iterations shipped:
+Certus is a fully local pipeline (Ollama or any OpenAI-compatible endpoint +
+on-device embeddings — SOPs never leave the building), with all six
+iterations shipped:
 
 - **Scenario generation** from a threat corpus; **answer key** derived from the
   SOP corpus, server-side only — it never reaches the browser, so trainees can't
@@ -76,6 +80,19 @@ leave the building), now with four full iterations shipped:
   Commission EM); an instructor override/appeal path where the machine
   verdict is preserved alongside the override; and the productized SOP-gap
   report as a standalone export.
+- **Dynamic scenarios & tabletop mode**: an advanced-difficulty knob (more
+  concurrent threats, deliberate diversions, ambiguous sensor pictures);
+  mid-scenario injects generated with the scenario but revealed only at the
+  drill's midpoint (answer-key isolation unchanged — the key is derived from
+  scenario + inject together); facilitated tabletop team drills recorded and
+  retention-tracked under the team's name; and the **readiness heatmap** —
+  the executive per-trainee × per-procedure view with staleness honesty (an
+  observation older than 90 days reads as "unknown", not as its old score).
+- **Reach**: any OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp,
+  OpenAI) via env vars with schema-enforced JSON output and graceful
+  fallback; Docker Compose on-prem deploy (app + Ollama sidecar, everything
+  in local volumes); per-profile output language for multilingual scenarios
+  and tutoring (BGE-M3 retrieval was already multilingual).
 
 The two remaining properties that make this defensible as more than a demo:
 answer-key isolation is enforced in code (corpus separation, ID-only grading
@@ -116,9 +133,10 @@ bottom on price — treat as later expansion, not the wedge.
 - **Docs-in, drills-out**: point it at an org's existing procedures (today: file
   upload via the admin panel; roadmap: SharePoint/Confluence/Notion connectors)
   and get a drill catalog in minutes — this is the demo that wins deals.
-- **Readiness heatmap** (roadmap): which procedures, on which teams, would fail
-  tonight, trending over time — the executive view built on the instructor
-  dashboard's data.
+- **Readiness heatmap** (shipped, first version): which procedures, on which
+  people and teams, would fail tonight — with staleness honesty (old
+  observations read as "unknown"). Trend-over-time cuts are the natural next
+  layer on the same recorded data.
 - **SOP-gap feedback loop** (seeded, shipped): when trainees consistently miss
   or reasonably deviate from the same step, the *document* gets flagged, not
   just the trainee. No competitor improves the customer's procedures as a
@@ -126,8 +144,9 @@ bottom on price — treat as later expansion, not the wedge.
 - **Certifiable assessment mode** (shipped): the no-leak grading architecture
   now backs scored assessments with audit-grade, tamper-evident evidence
   export — the thing an LMS completion can't be.
-- **Deployment spectrum**: fully local for the paranoid (today), managed cloud
-  for everyone else (roadmap), same profile format either way.
+- **Deployment spectrum**: fully local or Docker on-prem for the paranoid
+  (today, incl. any OpenAI-compatible endpoint), managed cloud for everyone
+  else (roadmap), same profile format either way.
 
 ## Iteration ladder
 
@@ -143,16 +162,15 @@ bottom on price — treat as later expansion, not the wedge.
 4. ✅ **Assessment & compliance mode** — shipped. Thresholds, attempt limits,
    timed drills, audit-grade evidence export with mandate stamping and
    tamper-evident hashing, cohort CSV, instructor override (appeal path),
-   and the productized SOP-gap report. Remaining gap from iteration 2's
-   notes: the per-team/trended readiness heatmap (executive view) — folded
-   into iteration 5 alongside tabletop mode.
-5. **Dynamic scenarios & tabletop mode** — mid-scenario injects, difficulty
-   knobs, multi-role team exercises; automates expensive consultant-led
-   tabletops and is a natural team-tier upsell.
-6. **Reach** — any OpenAI-compatible model endpoint, Docker on-prem deploy,
-   multilingual scenarios, doc-system connectors, managed-cloud tier, and
-   (long-term) an embed API for GRC/LMS/IR tools plus cross-customer readiness
-   benchmarks.
+   and the productized SOP-gap report.
+5. ✅ **Dynamic scenarios & tabletop mode** — shipped. Advanced-difficulty
+   knob, mid-scenario injects (revealed mid-drill, answer key derived with
+   them so isolation holds), tabletop team drills, and the readiness
+   heatmap carried over from iteration 4's notes.
+6. ✅ **Reach (core)** — shipped: any OpenAI-compatible model endpoint,
+   Docker on-prem deploy, per-profile language. Still open (needs customers
+   or cloud infra, Phase 2/3): doc-system connectors (SharePoint/Confluence/
+   Notion), managed-cloud tier, embed API, cross-customer benchmarks.
 
 ## Phased roadmap
 

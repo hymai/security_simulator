@@ -45,6 +45,8 @@ DEFAULTS = {
     "max_attempts_per_step": 2,   # graded answer attempts; questions are free
     "time_limit_minutes": 0,      # 0 = untimed
     "mandate": "",                # free text, e.g. "OSHA PSM 29 CFR 1910.119(o)"
+    "difficulty": "standard",     # or "advanced" — instructor-fixed, like the
+                                  # threshold: trainees don't pick their own bar
 }
 
 
@@ -156,6 +158,7 @@ def evidence_markdown(detail: dict, include_answers: bool = False) -> str:
         f"| Mandate | {settings['mandate'] or '—'} |",
         f"| Pass threshold | {settings['pass_threshold']:.0%} coverage |",
         f"| Attempt limit | {settings['max_attempts_per_step']} per step |",
+        f"| Difficulty | {settings['difficulty']} |",
         f"| Time limit | "
         f"{settings['time_limit_minutes'] or 'none'}"
         f"{' min' if settings['time_limit_minutes'] else ''} |",

@@ -1,0 +1,43 @@
+# On-prem deploy: the app plus an Ollama sidecar. SOPs, indices, session
+# records, and models all live in named volumes/bind mounts on the host —
+# nothing leaves the machine.
+#
+#   docker compose up -d --build
+#   docker compose exec ollama ollama pull qwen2.5:14b
+#   docker compose exec ollama ollama pull mistral-nemo:12b
+#   open http://localhost:8501
+#
+# To use a GPU with Ollama, add the usual `deploy.resources.reservations`
+# device block to the ollama service (see Ollama's Docker docs).
+
+services:
+  certus:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      CERTUS_OLLAMA_URL: http://ollama:11434/api/chat
+      # Uncomment to enable session recording + the admin panel/dashboard:
+      # CERTUS_RECORD_SESSIONS: "1"
+      # CERTUS_ADMIN_PASSWORD: "change-me"
+      # Or point at any OpenAI-compatible endpoint instead of Ollama:
+      # CERTUS_OPENAI_BASE_URL: http://vllm:8000/v1
+      # CERTUS_OPENAI_MODEL: Qwen/Qwen2.5-14B-Instruct
+    volumes:
+      - ./profiles:/app/profiles      # bring-your-own-corpus lives on the host
+      - certus-index:/app/.index      # built embedding indices
+      - certus-local:/app/.local      # recorded sessions (SQLite), if enabled
+      - certus-hf:/data/hf            # BGE-M3 download cache
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - certus-ollama:/root/.ollama   # pulled models
+
+volumes:
+  certus-index:
+  certus-local:
+  certus-hf:
+  certus-ollama:
