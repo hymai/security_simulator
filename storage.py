@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS grade_events (
 -- Assessment-mode columns (iteration 4) live in _SESSION_COLUMNS below and are
 -- ALTER'd in by _migrate(), so a pre-assessment sessions.db upgrades in place.
 
+-- Expert ground-truth for individual grade events (the calibration flywheel,
+-- see calibration.py). One label per event: which action ids the reviewing
+-- instructor judges the trainee to have ACTUALLY covered at that point.
+-- UNIQUE so a re-review replaces the previous label rather than stacking.
+CREATE TABLE IF NOT EXISTS calibration_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    grade_event_id INTEGER NOT NULL UNIQUE REFERENCES grade_events(id),
+    verified_ids TEXT NOT NULL,
+    labeler TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS retention_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile TEXT NOT NULL,
@@ -106,16 +119,29 @@ _SESSION_COLUMNS = {
     "override_at": "TEXT",
 }
 
+# Same in-place upgrade treatment for grade_events.
+#   context_text — the exact scenario text the grader saw for THIS turn. For
+#                  advanced-difficulty sessions this includes the revealed
+#                  inject, which the session's scenario_text never does — so
+#                  a calibration replay (calibrate_grader.py) can reproduce
+#                  the grading input verbatim. NULL on rows recorded before
+#                  this column existed; readers fall back to scenario_text.
+_GRADE_EVENT_COLUMNS = {
+    "context_text": "TEXT",
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _migrate(conn) -> None:
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
-    for col, decl in _SESSION_COLUMNS.items():
-        if col not in have:
-            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+    for table, columns in (("sessions", _SESSION_COLUMNS),
+                           ("grade_events", _GRADE_EVENT_COLUMNS)):
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, decl in columns.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
 @contextmanager
@@ -163,15 +189,15 @@ def save_steps(session_id: int, steps: list[dict]) -> None:
 
 def record_grade_event(session_id: int, step_number: int, attempt: int,
                        trainee_answer: str, covered_ids, missing_ids,
-                       complete: bool) -> None:
+                       complete: bool, context_text: str | None = None) -> None:
     with _conn() as c:
         c.execute(
             "INSERT INTO grade_events (session_id, step_number, attempt, "
-            "trainee_answer, covered_ids, missing_ids, complete, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "trainee_answer, covered_ids, missing_ids, complete, created_at, "
+            "context_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, step_number, attempt, trainee_answer,
              json.dumps(sorted(covered_ids)), json.dumps(sorted(missing_ids)),
-             int(complete), _now()),
+             int(complete), _now(), context_text),
         )
 
 
@@ -246,6 +272,64 @@ def session_detail(session_id: int) -> dict:
         session["steps"] = steps
         session["events"] = events
         return session
+
+
+# --- calibration labels (grader ground truth), for calibration.py -----------
+
+def upsert_calibration_label(grade_event_id: int, verified_ids,
+                             labeler: str, note: str = "") -> None:
+    """Record (or replace) the expert verdict for one grade event: the action
+    ids the reviewing instructor judges the trainee's cumulative answer to
+    have actually covered. Replacement, not stacking — the label is 'the
+    current expert reading of this event', and the dataset should carry one
+    ground truth per example."""
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO calibration_labels (grade_event_id, verified_ids, "
+            "labeler, note, created_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (grade_event_id) DO UPDATE SET "
+            "verified_ids = excluded.verified_ids, "
+            "labeler = excluded.labeler, "
+            "note = excluded.note, "
+            "created_at = excluded.created_at",
+            (grade_event_id, json.dumps(sorted(verified_ids)), labeler.strip(),
+             note.strip(), _now()),
+        )
+
+
+def calibration_events(profile: str | None = None) -> list[dict]:
+    """Every recorded grade event joined with its step's answer-key actions,
+    its session, and its expert label if one exists (verified_ids is None
+    until an instructor reviews it). JSON columns are decoded here, like
+    session_detail. Ordered by session/step/attempt so a caller can rebuild
+    each event's prior turns by walking the list (calibration.py does)."""
+    query = (
+        "SELECT ge.id AS event_id, ge.session_id, ge.step_number, ge.attempt, "
+        "ge.trainee_answer, ge.covered_ids, ge.complete, ge.created_at, "
+        "ge.context_text, "
+        "se.profile, se.trainee, se.mode, se.scenario_text, "
+        "st.title, st.actions, st.sources, "
+        "cl.verified_ids, cl.labeler, cl.note, cl.created_at AS labeled_at "
+        "FROM grade_events ge "
+        "JOIN sessions se ON se.id = ge.session_id "
+        "JOIN steps st ON st.session_id = ge.session_id "
+        "  AND st.step_number = ge.step_number "
+        "LEFT JOIN calibration_labels cl ON cl.grade_event_id = ge.id"
+    )
+    params: tuple = ()
+    if profile:
+        query += " WHERE se.profile = ?"
+        params = (profile,)
+    query += " ORDER BY ge.session_id, ge.step_number, ge.attempt"
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute(query, params).fetchall()]
+    for r in rows:
+        r["covered_ids"] = json.loads(r["covered_ids"])
+        r["actions"] = json.loads(r["actions"])
+        r["sources"] = json.loads(r["sources"])
+        if r["verified_ids"] is not None:
+            r["verified_ids"] = json.loads(r["verified_ids"])
+    return rows
 
 
 # --- retention state (spaced repetition), for retention.py ------------------

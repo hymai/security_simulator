@@ -1,0 +1,16 @@
+{
+  "display_name": "SG Commercial High-Rise (FSM / CERT)",
+  "incident_types": {
+    "Fire": "fire in refuse chute or carpark, electrical riser fire, F&B podium kitchen fire, smoke detector activation, sprinkler discharge",
+    "Hazmat": "refrigerant leak in the chiller plant, chemical spill at the loading bay, fumes in the basement, hazmat release",
+    "Bomb threat / suspicious item": "bomb threat phone call, suspicious package or unattended bag in the lobby, threatening note",
+    "Power failure / lift entrapment": "power outage, genset failure, lift entrapment with trapped occupants, water leak into an electrical riser"
+  },
+  "language": "English",
+  "assessment": {
+    "pass_threshold": 0.8,
+    "max_attempts_per_step": 2,
+    "time_limit_minutes": 30,
+    "mandate": "sg-scdf-cert-tte"
+  }
+}

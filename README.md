@@ -98,8 +98,11 @@ the app's own source.
 | `instructor_dashboard.py` | Per-trainee history, most-missed-SOP-step, and retention analytics |
 | `ollama_client.py` | Local Ollama chat client (streaming, JSON schema) |
 | `grading.py` | Grading prompt and leak-detection for hints |
+| `calibration.py` | Grader-calibration flywheel: labeled examples, agreement stats, dataset export — see below |
+| `calibrate_grader.py` | CLI: replay expert-labeled gradings through the live grader and report agreement |
+| `mandates.py` / `mandates/sg.json` | Regulatory mandate registry (Singapore pack) + cadence tracking — see below |
 | `calibrate_cutoff.py` | Script used to measure retrieval similarity cutoffs |
-| `spike_grader.py` | Standalone grading spike/prototype |
+| `spike_grader.py` | Standalone grading spike/prototype (synthetic cases) |
 | `tests/headless_checks.py` | End-to-end checks of the real app with the model layer faked (no Ollama needed) |
 | `Dockerfile` / `docker-compose.yml` | On-prem container deploy (app + Ollama sidecar) |
 | `profiles/<name>/config.json` | Display name, incident types, language, assessment settings |
@@ -214,6 +217,70 @@ The **Most-missed SOP steps** tab now also exports a standalone **SOP-gap
 report** (Markdown) — the document-first framing of the same data, ready to
 attach to a procedure-review ticket.
 
+## Grader calibration (the flywheel behind the evidence)
+
+"How do I know the grader is right?" is the first question a compliance buyer
+asks, so the answer is measured, not asserted. The dashboard's
+**Calibration** tab lets an instructor review recorded gradings one at a
+time — everything the trainee had said for that step, and which expected
+actions the model credited — and record the expert verdict. Every review
+becomes a labeled example, and three things fall out of the accumulating
+corpus:
+
+- **A per-profile accuracy figure** (exact-verdict agreement plus
+  action-level precision/recall), embedded live in every assessment evidence
+  export — or an honest "unmeasured on this corpus yet" when no reviews
+  exist, same staleness-honesty rule as the readiness heatmap.
+- **A regression corpus**: `python3 calibrate_grader.py <profile>` replays
+  the labeled events through the current grader (verbatim inputs, including
+  any revealed mid-drill inject) — so a model, prompt, or endpoint change is
+  measured against real trainee answers, not just `spike_grader.py`'s
+  synthetic cases. `--recorded-only` scores the as-recorded verdicts with no
+  model call.
+- **An exportable dataset** (JSONL, per profile) for external eval harnesses.
+  It contains answer-key action text — handle it like the SOPs themselves,
+  not like an evidence export.
+
+The instructor override path (above) feeds the same story at coarser grain:
+the override *rate* across finished assessments is reported alongside the
+agreement figures.
+
+## Regulatory mandate packs (Singapore first)
+
+A profile's `assessment.mandate` config value has always been stamped into
+evidence as free text. Setting it to a **registry id** from `mandates/`
+upgrades it to a citable mandate block: regulator, instrument, specific
+clauses, the requirement in one sentence, and an *evidence-scope* statement
+that says plainly what a Certus record does and does not demonstrate (a
+physical evacuation drill still has to happen; Certus complements it).
+Free-text values keep the old behavior untouched.
+
+The Singapore pack (`mandates/sg.json`) ships six mandates:
+
+| id | What it is |
+|---|---|
+| `sg-scdf-cert-tte` | SCDF — Fire Safety Act, CERT Regulations, National CERT Standard: FSM premises must run **2 table-top exercises + 2 evacuation drills/year** with CERT activated |
+| `sg-mom-wsh-mhi` | MOM — WSH (Major Hazard Installations) Regs 2017 safety-case regime (chemical/process; NEA & SCDF P&FM cross-refs) |
+| `sg-mom-wsh-general` | MOM — WSH Act + Risk Management Regs (manufacturing and general workplaces) |
+| `sg-mas-bcm` | MAS — BCM Guidelines 2022: regular testing, documented records, annual Board attestation |
+| `sg-csa-ccop` | CSA — Cybersecurity Act s.16/16L + CCoP 2.0 §7.3 (CII owners incl. utilities) |
+| `sg-mha-ipa` | MHA/SPF — Infrastructure Protection Act 2017 (protected places, special developments) |
+
+Mandates with a drill cadence get **cadence tracking**: the dashboard's
+Assessments tab and the readiness report show table-top exercises recorded
+in the trailing 12 months against the required number (tabletop sessions are
+recognized by their recorded team name). A statutory cadence (SCDF) is
+labeled as such; a suggested one (MAS/CSA, where the instrument says
+"regular") is labeled as suggested — never presented as law. Physical
+evacuation drills are shown as a reminder, never counted automatically.
+
+The **`sg_highrise` demo profile** is a Singapore commercial high-rise (FSM +
+CERT structure: Site Main Controller, Site Incident Controller, 995/999
+notifications, ERP components) with threat catalog and SOPs ready to index:
+`python3 build_index.py sg_highrise`. Its config points at
+`sg-scdf-cert-tte`, so demo assessments export SCDF-citable evidence out of
+the box.
+
 ## Difficulty, injects & tabletop mode
 
 - **Advanced difficulty** (checkbox in training; set per profile for
@@ -231,13 +298,26 @@ attach to a procedure-review ticket.
   retention schedule) is recorded under the team's collective name.
   Assessments stay individual: they certify people, not rooms.
 
-## Readiness heatmap
+## Readiness heatmap & trend
 
 The instructor dashboard's **Readiness** tab is the executive view: latest
 observed competence per trainee × SOP document (🟢 ready · 🟡 shaky · 🔴 at
 risk · ⚪ unknown — last observation over 90 days old, because an old green
 is not a current green), plus per-procedure "trainees ready" counts, worst
 first. Derived at read time from recorded drills and assessments.
+
+Below the heatmap, **Readiness over time** adds the longitudinal layer: the
+same four states snapshotted at regular intervals across the whole recorded
+history, as a stacked composition over a fixed universe of every (trainee,
+procedure) pair ever observed. Two honest movements show: pairs not yet
+observed count as unknown early on (coverage growing), and a pair whose last
+drill ages past 90 days *returns* to unknown — the line goes down when
+drilling stops. A readiness number that can only go up isn't a measurement.
+
+The **readiness report** (Markdown download on the same tab) packages this
+for a board pack: tonight's picture, the trend table, and per-procedure
+ready counts now vs 30 days ago with an improving/holding/declining
+direction per document.
 
 ## Model endpoints
 

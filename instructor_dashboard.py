@@ -18,6 +18,8 @@ import pandas as pd
 import streamlit as st
 
 import assessment
+import calibration
+import mandates
 import retention
 import storage
 
@@ -88,6 +90,8 @@ def _render_assessments_tab(profile: str | None) -> None:
     export, the cohort CSV, and the appeal/override path. Overrides never
     mutate the machine verdict (storage.override_assessment) — both are
     shown, and both land in the evidence export."""
+    _render_mandate_cadence(profile)
+
     sessions = [s for s in storage.list_sessions(profile)
                 if s.get("mode") == "assessment"]
     if not sessions:
@@ -152,6 +156,145 @@ def _render_assessments_tab(profile: str | None) -> None:
                 st.rerun()
 
 
+def _render_mandate_cadence(profile: str | None) -> None:
+    """Cadence progress for a registry mandate (mandates.py) — e.g. SCDF's
+    2 table-top exercises + 2 evacuation drills per year. Only renders when a
+    single profile is selected AND its configured mandate is a registry id
+    with a cadence; free-text mandates change nothing."""
+    if not profile:
+        return
+    try:
+        mandate = mandates.get(assessment.load_settings(profile)["mandate"])
+    except OSError:
+        return
+    if not mandate:
+        return
+    status = mandates.cadence_status(profile, mandate)
+    if not status:
+        return
+
+    st.markdown(f"**Mandate cadence** — {mandate['regulator']} "
+                f"(trailing {status['window_days']} days)")
+    if status["basis"] and status["basis"] != "statutory":
+        st.caption(f"Cadence basis: {status['basis']}")
+    cols = st.columns(max(2, len(status["requirements"])))
+    for col, r in zip(cols, status["requirements"]):
+        with col:
+            if r["recorded"] is None:
+                st.metric(r["label"], f"{r['required']}/yr required",
+                          help="Conducted physically and documented outside "
+                               "Certus — shown here so the schedule isn't "
+                               "forgotten, never counted automatically.")
+            else:
+                st.metric(r["label"], f"{r['recorded']} of {r['required']}",
+                          delta=(f"-{r['shortfall']} needed"
+                                 if r["shortfall"] else "on track"),
+                          delta_color="inverse" if r["shortfall"] else "normal")
+
+
+def _render_calibration_tab(profile: str | None) -> None:
+    """The calibration flywheel's instructor surface: review individual
+    gradings against the recorded answers, record the expert verdict, watch
+    the agreement figures accumulate, export the dataset. Unlike the evidence
+    export, this tab shows answer-key action TEXT — necessary for judging
+    coverage, acceptable because the whole dashboard sits behind the admin
+    password gate."""
+    st.caption(
+        "Review recorded gradings one at a time: read what the trainee had "
+        "said up to that turn, then mark which expected actions were actually "
+        "covered. Each review becomes a labeled example — the agreement "
+        "figures below appear in every evidence export for this profile, and "
+        "the dataset feeds calibrate_grader.py when tuning the grader.")
+
+    all_examples = calibration.examples(profile)
+    if not all_examples:
+        st.info("No recorded grade events yet. Labels come from recorded "
+                "sessions — run some drills with recording on first.")
+        return
+
+    stats = calibration.grader_stats(profile)
+    col_n, col_agree, col_pr, col_ovr = st.columns(4)
+    col_n.metric("Expert-reviewed", f"{stats['labeled']} / {stats['events']}")
+    col_agree.metric("Exact agreement",
+                     f"{stats['agreement']:.0%}" if stats["labeled"] else "—",
+                     help="Share of reviewed gradings where the expert marked "
+                          "exactly the same covered actions as the model.")
+    col_pr.metric("Precision / recall",
+                  (f"{stats['precision']:.0%} / {stats['recall']:.0%}"
+                   if stats["labeled"] else "—"),
+                  help="Action-level: precision = model credits the expert "
+                       "confirmed; recall = expert credits the model caught.")
+    col_ovr.metric("Override rate",
+                   (f"{stats['override_rate']:.0%}"
+                    if stats["override_rate"] is not None else "—"),
+                   help="Finished assessments whose verdict an instructor "
+                        "overrode — the coarser trust signal.")
+
+    labeled_rows = calibration.labeled(profile)
+    if labeled_rows:
+        per_source = calibration.per_source_stats(labeled_rows)
+        if per_source:
+            df = pd.DataFrame(per_source)
+            df["agreement"] = (df["agreement"] * 100).round(0).astype(int).astype(str) + "%"
+            df = df[["source", "labeled", "agreement"]]
+            df.columns = ["SOP source", "reviewed", "exact agreement"]
+            st.markdown("**Agreement by SOP source** (weakest first)")
+            st.dataframe(df, hide_index=True, width="stretch")
+        st.download_button(
+            "Download calibration dataset (.jsonl)",
+            calibration.to_jsonl(labeled_rows),
+            file_name=f"calibration_{profile or 'all'}.jsonl",
+            mime="application/jsonl")
+        st.caption("The dataset contains answer-key action text — handle it "
+                   "like the SOPs themselves, not like an evidence export.")
+
+    unlabeled = [e for e in all_examples if e["verified_ids"] is None]
+    st.markdown(f"**Review queue** — {len(unlabeled)} grading(s) awaiting review")
+    if not unlabeled:
+        st.success("Every recorded grading for this profile has been reviewed.")
+        return
+
+    chosen = st.selectbox(
+        "Grading to review", unlabeled, key="calibration_pick",
+        format_func=lambda e: (f"#{e['event_id']} — {e['trainee']} — "
+                               f"step {e['step_number']}, attempt "
+                               f"{e['attempt']} ({e['mode']})"))
+    st.markdown(f"**Step {chosen['step_number']}: {chosen['title']}** — "
+                f"sources: {', '.join(chosen['sources']) or '—'}")
+    if chosen["prior_answer"]:
+        st.markdown("Trainee's earlier answers for this step:")
+        st.info(chosen["prior_answer"])
+    st.markdown("Trainee's answer this turn:")
+    st.info(chosen["message"])
+
+    def _fmt(aid: str) -> str:
+        role, action = chosen["actions"][aid]
+        return f"{aid} · [{role}] {action}"
+
+    model_set = set(chosen["model_ids"])
+    verified = st.multiselect(
+        "Actions the trainee's cumulative answer actually covered "
+        "(pre-filled with the model's verdict — correct it where it's wrong)",
+        options=sorted(chosen["actions"]),
+        default=sorted(model_set & set(chosen["actions"])),
+        format_func=_fmt, key=f"cal_ids_{chosen['event_id']}")
+    labeler = st.text_input("Reviewer name (required)",
+                            key=f"cal_labeler_{chosen['event_id']}")
+    note = st.text_input("Note (optional — e.g. why the model was wrong)",
+                         key=f"cal_note_{chosen['event_id']}")
+    if st.button("Record expert verdict", key=f"cal_b_{chosen['event_id']}"):
+        if not labeler.strip():
+            st.warning("A label without a reviewer isn't auditable — add "
+                       "your name.")
+        else:
+            storage.upsert_calibration_label(chosen["event_id"], verified,
+                                             labeler, note)
+            agree = set(verified) == model_set
+            st.success("Recorded — expert "
+                       f"{'agrees' if agree else 'DISAGREES'} with the model.")
+            st.rerun()
+
+
 def _render_readiness_tab(profile: str | None) -> None:
     """The executive view: which procedures, on which people, would fail
     tonight. Emoji cells rather than CSS so it renders identically in light/
@@ -167,13 +310,12 @@ def _render_readiness_tab(profile: str | None) -> None:
         st.info("No completed recorded sessions with named trainees yet.")
         return
 
+    icons = {"ready": "🟢", "shaky": "🟡", "at_risk": "🔴", "unknown": "⚪"}
+
     def cell_icon(cell):
         if cell is None:
             return ""
-        if cell["stale"]:
-            return "⚪"
-        q = cell["quality"]
-        return "🟢" if q >= 4 else ("🟡" if q == 3 else "🔴")
+        return icons[retention.state_of(cell["quality"], cell["stale"])]
 
     rows = []
     for trainee in matrix["trainees"]:
@@ -190,6 +332,35 @@ def _render_readiness_tab(profile: str | None) -> None:
                                     key=lambda kv: kv[1]["ready"] / kv[1]["total"])]
     st.markdown("**Per-procedure readiness** (worst first)")
     st.dataframe(pd.DataFrame(summary), hide_index=True, width="stretch")
+
+    # The longitudinal layer: the same four states snapshotted across the
+    # whole recorded history. Colors validated for light/dark and CVD
+    # separation; "unknown" is deliberately neutral gray. Identity never
+    # rides on color alone — the legend names each state and the tables
+    # above carry the same data.
+    trend = retention.readiness_trend(profile)
+    if len(trend["dates"]) >= 2:
+        st.markdown(f"**Readiness over time** — all {trend['pairs']} "
+                    f"(trainee, procedure) pairs ever observed, snapshotted "
+                    f"every {trend['step_days']} days")
+        df = pd.DataFrame(trend["counts"],
+                          index=pd.to_datetime(trend["dates"]))
+        df.columns = ["ready", "shaky", "at risk", "unknown"]
+        # stack=True: this is a composition — the four states always sum to
+        # the fixed pair universe, so the stack's flat top IS the denominator.
+        st.area_chart(df, color=["#2a9d8f", "#d97706", "#e63946", "#6b7280"],
+                      stack=True)
+        st.caption("Pairs not yet observed count as unknown, and a pair whose "
+                   "last drill ages past 90 days RETURNS to unknown — the "
+                   "line goes down when drilling stops. That decline is "
+                   "honest: a readiness number that can only go up isn't a "
+                   "measurement.")
+
+    st.download_button(
+        "Download readiness report (.md)",
+        assessment.readiness_report(profile),
+        file_name=f"readiness_report_{profile or 'all'}.md",
+        mime="text/markdown")
 
 
 def _render_retention_tab(profile: str | None) -> None:
@@ -271,9 +442,10 @@ def render() -> None:
     choice = st.selectbox("Profile", ["All"] + profiles, key="dashboard_profile_filter")
     selected_profile = None if choice == "All" else choice
 
-    tab_sessions, tab_assessments, tab_readiness, tab_missed, tab_retention = \
-        st.tabs(["Sessions", "Assessments", "Readiness", "Most-missed SOP steps",
-                 "Retention"])
+    (tab_sessions, tab_assessments, tab_readiness, tab_missed, tab_retention,
+     tab_calibration) = st.tabs(
+        ["Sessions", "Assessments", "Readiness", "Most-missed SOP steps",
+         "Retention", "Calibration"])
     with tab_sessions:
         _render_sessions_tab(selected_profile)
     with tab_assessments:
@@ -284,3 +456,5 @@ def render() -> None:
         _render_most_missed_tab(selected_profile)
     with tab_retention:
         _render_retention_tab(selected_profile)
+    with tab_calibration:
+        _render_calibration_tab(selected_profile)

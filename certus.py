@@ -598,7 +598,10 @@ if st.session_state.stage == 2:
                     attempt_counts[step_number] = attempt
                     storage.record_grade_event(
                         st.session_state.db_session_id, step_number, attempt, prompt,
-                        verdict["covered_ids"], verdict["missing_ids"], verdict["complete"])
+                        verdict["covered_ids"], verdict["missing_ids"], verdict["complete"],
+                        # The exact text the grader saw this turn (incl. a
+                        # revealed inject) so calibration replays are verbatim.
+                        context_text=scenario_text)
 
             if is_assessment:
                 # attempt_counts was just incremented in the recording block

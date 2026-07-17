@@ -24,6 +24,7 @@ qualities — grasp of an SOP is only as good as the worst step drawing on it.
 
 import json
 import logging
+import math
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -220,7 +221,38 @@ def retention_metrics(profile: str | None = None) -> dict:
             "per_source": sorted(per_source.values(), key=lambda r: -r["n30"])}
 
 
-def readiness_matrix(profile: str | None = None, stale_days: int = 90) -> dict:
+def state_of(quality: int, stale: bool) -> str:
+    """The heatmap's four states as one canonical mapping, so the matrix, the
+    trend, the dashboard icons, and the readiness report can never drift:
+    ready (clean/near-clean last drill) · shaky (heavy prompting) · at_risk
+    (couldn't complete) · unknown (observation too old to trust)."""
+    if stale:
+        return "unknown"
+    if quality >= RETAINED_QUALITY:
+        return "ready"
+    return "shaky" if quality == 3 else "at_risk"
+
+
+def _observations(profile: str | None) -> tuple[list[tuple], dict[str, str]]:
+    """Every (trainee_key, source, observed_at, quality) observation from
+    completed sessions in start order, plus display names — the one extraction
+    both the latest-state matrix and the trend snapshots derive from."""
+    out: list[tuple] = []
+    display_by_key: dict[str, str] = {}
+    for s in storage.completed_sessions(profile):
+        key = _trackable_key(s["trainee"])
+        if key is None:
+            continue
+        display_by_key[key] = s["trainee"].strip()
+        detail = storage.session_detail(s["id"])
+        at = datetime.fromisoformat(s["started_at"])
+        for source, q in session_source_qualities(detail["steps"], detail["events"]).items():
+            out.append((key, source, at, q))
+    return out, display_by_key
+
+
+def readiness_matrix(profile: str | None = None, stale_days: int = 90,
+                     as_of: datetime | None = None) -> dict:
     """The executive heatmap: latest observed quality per (trainee, SOP source),
     derived at read time from completed sessions (training AND assessment both
     count — each is a real retrieval event).
@@ -230,21 +262,20 @@ def readiness_matrix(profile: str | None = None, stale_days: int = 90) -> dict:
     executive read is then "unknown", not the old score; memory decays and
     that decay is the product's whole thesis.
 
+    `as_of` rewinds the whole view to a past instant (observations after it
+    are ignored; staleness is measured against it) — the readiness report
+    uses this for its "vs 30 days ago" comparison.
+
     Returns {"trainees": [display...], "sources": [...], "cells": {(display,
     source): cell}, "source_summary": {source: {"ready": n, "total": n}}}.
     """
+    now = as_of or _utcnow()
     latest: dict[tuple[str, str], dict] = {}
-    display_by_key: dict[str, str] = {}
-    for s in storage.completed_sessions(profile):
-        key = _trackable_key(s["trainee"])
-        if key is None:
-            continue
-        display_by_key[key] = s["trainee"].strip()
-        detail = storage.session_detail(s["id"])
-        for source, q in session_source_qualities(detail["steps"], detail["events"]).items():
-            latest[(key, source)] = {"quality": q, "observed_at": s["started_at"]}
+    observations, display_by_key = _observations(profile)
+    for key, source, at, q in observations:
+        if at <= now:
+            latest[(key, source)] = {"quality": q, "observed_at": at.isoformat()}
 
-    now = _utcnow()
     cells: dict[tuple[str, str], dict] = {}
     source_summary: dict[str, dict] = {}
     for (key, source), cell in latest.items():
@@ -253,7 +284,7 @@ def readiness_matrix(profile: str | None = None, stale_days: int = 90) -> dict:
         cells[(display_by_key[key], source)] = cell
         entry = source_summary.setdefault(source, {"ready": 0, "total": 0})
         entry["total"] += 1
-        if not cell["stale"] and cell["quality"] >= RETAINED_QUALITY:
+        if state_of(cell["quality"], cell["stale"]) == "ready":
             entry["ready"] += 1
 
     return {
@@ -262,6 +293,59 @@ def readiness_matrix(profile: str | None = None, stale_days: int = 90) -> dict:
         "cells": cells,
         "source_summary": source_summary,
     }
+
+
+def readiness_trend(profile: str | None = None, stale_days: int = 90,
+                    max_points: int = 26) -> dict:
+    """Readiness composition over time: the heatmap's states snapshotted at
+    regular intervals across the whole recorded history — the longitudinal
+    record behind the executive chart and the readiness report.
+
+    The pair universe is FIXED at every (trainee, source) ever observed, so
+    the total is constant across snapshots and two honest movements show:
+    pairs not yet observed count as unknown early on (coverage growing), and
+    a pair whose last observation ages past `stale_days` RETURNS to unknown —
+    the line goes down when drilling stops. That decline is the point: a
+    readiness number that can only go up isn't a measurement.
+
+    Snapshots are anchored on now and step back a whole number of days —
+    at least weekly, widening so the series stays under `max_points`.
+
+    Returns {"dates": [iso date...], "counts": [{state: n}...], "pairs": N,
+    "step_days": int} — counts keyed by state_of's four states.
+    """
+    observations, _ = _observations(profile)
+    if not observations:
+        return {"dates": [], "counts": [], "pairs": 0, "step_days": 0}
+
+    per_pair: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
+    for key, source, at, q in observations:
+        per_pair.setdefault((key, source), []).append((at, q))
+    for rows in per_pair.values():
+        rows.sort(key=lambda r: r[0])
+
+    end = _utcnow()
+    span = max((end - min(at for _, _, at, _ in observations)).days, 1)
+    step = max(7, math.ceil(span / max_points))
+    dates = [end - timedelta(days=i * step) for i in range(span // step + 1)][::-1]
+
+    counts = []
+    for t in dates:
+        tally = {"ready": 0, "shaky": 0, "at_risk": 0, "unknown": 0}
+        for rows in per_pair.values():
+            latest = None
+            for at, q in rows:
+                if at > t:
+                    break
+                latest = (at, q)
+            if latest is None:
+                tally["unknown"] += 1
+            else:
+                tally[state_of(latest[1], (t - latest[0]).days > stale_days)] += 1
+        counts.append(tally)
+
+    return {"dates": [t.date().isoformat() for t in dates], "counts": counts,
+            "pairs": len(per_pair), "step_days": step}
 
 
 def _loads(text: str) -> list:

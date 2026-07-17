@@ -12,6 +12,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 os.environ["CERTUS_RECORD_SESSIONS"] = "1"
 os.environ["CERTUS_ADMIN_PASSWORD"] = "test-pw"
@@ -32,6 +33,7 @@ retrieval.get_model = lambda: None
 retrieval.load_index = lambda profile, name: {"fake": True}
 
 import assessment  # noqa: E402
+import calibration  # noqa: E402
 import pipeline  # noqa: E402
 import retention  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -260,10 +262,200 @@ def check_readiness_and_dashboard(team_session_id: int):
     at = AppTest.from_function(_dash, default_timeout=30)
     at.run()
     assert not at.exception, at.exception
-    print("OK dashboard — all five tabs render against recorded data")
+    print("OK dashboard — all six tabs render against recorded data")
 
 
-# --- section 5: language rule ---------------------------------------------------
+# --- section 5: calibration flywheel ------------------------------------------
+
+def check_calibration():
+    # Ada's assessment from section 1 (the one with scenario_text 'scenario';
+    # sections 2-3 record their own sessions) has 4 grade events without
+    # context_text — exercising the pre-column fallback. Add one event WITH a
+    # context to cover the verbatim-replay path too.
+    sid = [s for s in storage.list_sessions("default")
+           if s["scenario_text"] == "scenario"][0]["id"]
+    storage.record_grade_event(sid, 2, 3, "notify HQ as well", ["b1", "b2"],
+                               [], True, context_text="scenario + inject")
+
+    unlabeled = calibration.examples("default")
+    assert all(e["verified_ids"] is None for e in unlabeled)
+
+    # Prior reconstruction mirrors certus.py: attempt N's prior is attempts
+    # 1..N-1 for the same session+step, newline-joined.
+    step1 = sorted((e for e in unlabeled
+                    if e["session_id"] == sid and e["step_number"] == 1),
+                   key=lambda e: e["attempt"])
+    assert step1[0]["prior_answer"] == ""
+    assert step1[1]["prior_answer"] == "lock the gate"
+    step2 = sorted((e for e in unlabeled
+                    if e["session_id"] == sid and e["step_number"] == 2),
+                   key=lambda e: e["attempt"])
+    assert step2[2]["prior_answer"] == "file a report\nhmm"
+    assert step2[2]["context"] == "scenario + inject"      # stored context wins
+    assert step2[0]["context"] == "scenario"               # fallback to session
+    print("OK calibration examples — prior rebuilt, context falls back")
+
+    # Label three events: one exact agree, one model over-credit (precision
+    # hit), one model under-credit (recall hit).
+    storage.upsert_calibration_label(step1[0]["event_id"], ["a1"], "Ines")
+    storage.upsert_calibration_label(step1[1]["event_id"], ["a1"], "Ines",
+                                     note="a2 was never described")
+    storage.upsert_calibration_label(step2[0]["event_id"], ["b1", "b2"], "Ines")
+
+    rows = calibration.labeled("default")
+    assert len(rows) == 3
+    stats = calibration.agreement_stats(rows)
+    # model: {a1}={a1} ✓ · {a1,a2}⊃{a1} ✗ · {b1}⊂{b1,b2} ✗
+    assert stats["agree"] == 1 and stats["labeled"] == 3
+    assert abs(stats["precision"] - 3 / 4) < 1e-9   # a2 over-credited
+    assert abs(stats["recall"] - 3 / 4) < 1e-9      # b2 missed
+    per_src = {r["source"]: r for r in calibration.per_source_stats(rows)}
+    assert per_src["perimeter.md"]["labeled"] == 2
+    print("OK calibration stats — agreement 1/3, precision/recall 75%")
+
+    # Relabeling replaces, never stacks.
+    storage.upsert_calibration_label(step1[1]["event_id"], ["a1", "a2"], "Ines",
+                                     note="on reflection the paraphrase counts")
+    assert calibration.agreement_stats(calibration.labeled("default"))["agree"] == 2
+
+    jsonl = calibration.to_jsonl(calibration.labeled("default"))
+    lines = [l for l in jsonl.splitlines() if l]
+    assert len(lines) == 3
+    first = __import__("json").loads(lines[0])
+    assert first["verified_ids"] == ["a1"] and "actions" in first
+    print("OK calibration dataset — JSONL round-trips, relabel replaces")
+
+    # The evidence export now carries live calibration figures; the override
+    # recorded in section 1 shows up as the override rate.
+    md = assessment.evidence_markdown(storage.session_detail(sid))
+    assert "Grader calibration" in md and "reviewed by an instructor" in md
+    g = calibration.grader_stats("default")
+    assert g["overridden"] >= 1 and g["override_rate"] is not None
+    print("OK calibration evidence — figures embedded in the evidence export")
+
+
+# --- section 6: readiness trend -------------------------------------------------
+
+def _dated_session(profile, trainee, source, days_ago):
+    """One clean completed drill (q=5) on `source`, back-dated `days_ago`."""
+    sid = storage.start_session(profile, trainee, ["Drill"], "s")
+    storage.save_steps(sid, [{"step": 1, "title": "T", "sources": [source],
+                              "actions": {"a1": ["Role", "act"]}}])
+    storage.record_grade_event(sid, 1, 1, "did it", ["a1"], [], True)
+    storage.complete_session(sid)
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    conn = sqlite3.connect(storage.DB_PATH)
+    conn.execute("UPDATE sessions SET started_at = ?, completed_at = ? "
+                 "WHERE id = ?", (ts, ts, sid))
+    conn.commit()
+    conn.close()
+
+
+def check_readiness_trend():
+    # Isolated profile: Zoe drilled alpha.md 120 days ago and beta.md 40 days
+    # ago. The fixed pair universe is {(Zoe, alpha), (Zoe, beta)}.
+    _dated_session("trendsite", "Zoe", "alpha.md", 120)
+    _dated_session("trendsite", "Zoe", "beta.md", 40)
+
+    trend = retention.readiness_trend("trendsite")
+    assert trend["pairs"] == 2 and trend["step_days"] == 7
+    assert len(trend["dates"]) == 18                    # 120-day span, weekly
+    # Earliest snapshot (119 days ago): alpha fresh, beta not yet observed.
+    assert trend["counts"][0] == {"ready": 1, "shaky": 0, "at_risk": 0,
+                                  "unknown": 1}
+    # 35 days ago: alpha 85 days old (still fresh), beta 5 days old.
+    assert trend["counts"][12]["ready"] == 2
+    # Now: alpha aged past 90 days — readiness DECLINES to unknown.
+    assert trend["counts"][-1] == {"ready": 1, "shaky": 0, "at_risk": 0,
+                                   "unknown": 1}
+    print("OK readiness trend — coverage grows, then staleness decays it")
+
+    # as_of rewinds the matrix: 50 days ago beta didn't exist yet.
+    then = retention.readiness_matrix(
+        "trendsite", as_of=datetime.now(timezone.utc) - timedelta(days=50))
+    assert set(then["sources"]) == {"alpha.md"}
+    assert then["source_summary"]["alpha.md"] == {"ready": 1, "total": 1}
+    print("OK readiness as-of — past view ignores later observations")
+
+    md = assessment.readiness_report("trendsite")
+    assert "Tonight's picture:** 1 of 2" in md
+    # alpha was ready 30 days ago (age 90 = not yet stale), unknown now.
+    assert "| `alpha.md` | 0/1 | 1/1 | ↓ declining |" in md
+    assert "| `beta.md` | 1/1 | 1/1 | → holding |" in md
+    print("OK readiness report — trend table and per-procedure direction")
+
+
+# --- section 7: Singapore mandate pack ------------------------------------------
+
+def check_mandates():
+    import mandates
+
+    # Registry integrity: every entry auditable — required fields, official
+    # sources, and the honesty fields (evidence_scope; cadence_basis when a
+    # cadence exists).
+    entries = mandates.all_mandates()
+    assert len(entries) == 6
+    for m in entries:
+        for field in ("id", "regulator", "instrument", "clauses",
+                      "requirement", "applies_to", "evidence_scope", "sources"):
+            assert m.get(field), f"{m.get('id')}: missing {field}"
+        assert all(src.startswith("https://") for src in m["sources"])
+        if m["cadence"]:
+            assert m["cadence_basis"], f"{m['id']}: cadence without basis"
+    scdf = mandates.get("sg-scdf-cert-tte")
+    assert scdf["cadence"] == {"tabletops_per_year": 2, "drills_per_year": 2}
+    assert scdf["cadence_basis"] == "statutory"
+    assert mandates.get("OSHA PSM emergency response readiness") is None
+    print("OK mandate registry — 6 SG mandates, sourced, honesty fields set")
+
+    # Evidence export: a registry-id mandate expands into the citation block;
+    # free text (section 1's OSHA session) keeps legacy behavior.
+    ada_sid = [s for s in storage.list_sessions("default")
+               if s["scenario_text"] == "scenario"][0]["id"]
+    assert "## Mandate" not in assessment.evidence_markdown(
+        storage.session_detail(ada_sid))
+
+    sid = storage.start_session(
+        "sg_highrise", "Ben", ["Fire"], "tower fire scenario",
+        mode="assessment",
+        settings={"pass_threshold": 0.8, "max_attempts_per_step": 2,
+                  "time_limit_minutes": 30, "mandate": "sg-scdf-cert-tte"})
+    storage.save_steps(sid, [
+        {"step": 1, "title": "Verify", "threat": "alarm",
+         "actions": {"a1": ["FCC Security Officer", "check the CCTV"]},
+         "sources": ["fire-response-and-evacuation.md"]}])
+    storage.record_grade_event(sid, 1, 1, "check the camera", ["a1"], [], True)
+    storage.finish_assessment(sid, 1.0, True)
+    md = assessment.evidence_markdown(storage.session_detail(sid))
+    for needle in ("## Mandate", "Singapore Civil Defence Force",
+                   "2 table-top exercises", "it does not substitute"):
+        assert needle in md, needle
+    print("OK mandate evidence — SCDF citation block with scope honesty")
+
+    # Cadence math on 'default': one completed Team session (section 3,
+    # re-dated to March, still inside 365 days) + three finished assessments
+    # (sections 1, 2, and none other — the sg_highrise one is a different
+    # profile).
+    status = mandates.cadence_status("default", scdf)
+    assert status["tabletops"] == 1 and status["assessments"] == 2
+    tte = status["requirements"][0]
+    assert tte == {"label": "table-top exercises", "required": 2,
+                   "recorded": 1, "shortfall": 1}
+    assert status["requirements"][1]["recorded"] is None   # physical drills
+    print("OK mandate cadence — 1 of 2 TTEs, physical drills never counted")
+
+    # Readiness report for a profile whose configured mandate is a registry
+    # id: citation + cadence progress appear in the same artifact.
+    _dated_session("sg_highrise", "Zoe", "fire-response-and-evacuation.md", 10)
+    md = assessment.readiness_report("sg_highrise")
+    for needle in ("## Mandate", "Singapore Civil Defence Force",
+                   "Cadence (trailing 365 days)",
+                   "table-top exercises: 0 of 2 recorded — 2 more needed"):
+        assert needle in md, needle
+    print("OK mandate in readiness report — citation and cadence gap")
+
+
+# --- section 8: language rule ---------------------------------------------------
 
 def check_language_rule():
     assert pipeline._language_rule("English", "x") == ""
@@ -276,6 +468,9 @@ if __name__ == "__main__":
     check_storage_and_scoring()
     check_assessment_flow()
     sid = check_training_advanced_flow()
+    check_calibration()
+    check_readiness_trend()
+    check_mandates()
     check_readiness_and_dashboard(sid)
     check_language_rule()
     print("\nALL HEADLESS CHECKS PASSED")

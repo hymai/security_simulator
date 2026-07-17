@@ -33,9 +33,12 @@ import csv
 import hashlib
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import calibration
 import corpus_config
+import mandates
+import retention
 import storage
 
 # Per-profile overrides live under an "assessment" key in
@@ -198,6 +201,18 @@ def evidence_markdown(detail: dict, include_answers: bool = False) -> str:
                       f"({e['created_at'][:19]} UTC):",
                       f"> {e['trainee_answer']}", ""]
 
+    # If the mandate field is a registry id, expand it into the full citation
+    # an auditor can act on. Free-text mandates keep legacy behavior (the
+    # value in the header table) with no extra section.
+    mandate = mandates.get(settings["mandate"])
+    if mandate:
+        lines += ["", "## Mandate", ""] + mandates.citation_markdown(mandate)
+
+    # Live calibration figures, not boilerplate: how often expert review has
+    # agreed with this profile's grader so far — or an honest "unmeasured".
+    lines += ["", "## Grader calibration", "",
+              calibration.evidence_text(detail["profile"])]
+
     lines += ["", "---", "", _INTEGRITY_STATEMENT, ""]
     body = "\n".join(lines)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -230,6 +245,116 @@ def cohort_csv(sessions: list[dict]) -> str:
     return buf.getvalue()
 
 
+# --- readiness report ----------------------------------------------------------
+
+def _display_name(profile: str | None) -> str:
+    if not profile:
+        return "all profiles"
+    try:
+        return corpus_config.load_config(profile)["display_name"]
+    except OSError:
+        return profile
+
+
+def readiness_report(profile: str | None, stale_days: int = 90) -> str:
+    """The executive readiness artifact: current heatmap summary, the trend
+    over the whole recorded history, and a per-procedure now-vs-30-days-ago
+    comparison — a Markdown report a risk lead can drop into a board pack.
+
+    Everything is derived at read time from recorded sessions (the same
+    derivation as the dashboard), with the heatmap's staleness rule applied
+    at every point in time: an observation older than `stale_days` reads as
+    unknown, so the trend DECLINES when drilling stops. A readiness number
+    that can only go up isn't a measurement — that honesty is stated in the
+    report itself so the reader knows a dip means 'evidence expired', not
+    'people got worse overnight'."""
+    matrix = retention.readiness_matrix(profile, stale_days)
+    trend = retention.readiness_trend(profile, stale_days)
+    today = datetime.now(timezone.utc).date().isoformat()
+    lines = [
+        f"# Readiness report — {_display_name(profile)}",
+        "",
+        f"_Generated {today} by Certus from recorded drill and assessment "
+        "sessions. A (trainee, procedure) pair is **ready** when its latest "
+        "drill was completed cleanly or near-cleanly; **shaky** with heavy "
+        "prompting; **at risk** when it couldn't be completed; **unknown** "
+        f"when the last observation is more than {stale_days} days old — an "
+        "old green is not a current green, so readiness declines when "
+        "drilling stops. A dip in the trend means evidence expired, not that "
+        "people got worse overnight — and both are reasons to drill._",
+        "",
+    ]
+    if not trend["pairs"]:
+        lines += ["No recorded sessions with named trainees yet — no "
+                  "readiness can be claimed.", ""]
+        return "\n".join(lines)
+
+    current = trend["counts"][-1]
+    lines += [
+        f"**Tonight's picture:** {current['ready']} of {trend['pairs']} "
+        f"(trainee, procedure) pairs ready "
+        f"({current['ready'] / trend['pairs']:.0%}) · {current['shaky']} "
+        f"shaky · {current['at_risk']} at risk · {current['unknown']} "
+        f"unknown.",
+        "",
+        f"## Trend (snapshots every {trend['step_days']} days)",
+        "",
+        "| As of | Ready | Shaky | At risk | Unknown | Ready % |",
+        "|---|---|---|---|---|---|",
+    ]
+    for date, c in zip(trend["dates"], trend["counts"]):
+        lines.append(f"| {date} | {c['ready']} | {c['shaky']} | "
+                     f"{c['at_risk']} | {c['unknown']} | "
+                     f"{c['ready'] / trend['pairs']:.0%} |")
+
+    # The profile's configured mandate, expanded when it's a registry id —
+    # with cadence progress, so the report answers "are we on track for the
+    # drills the regulator expects" in the same artifact.
+    if profile:
+        try:
+            mandate = mandates.get(load_settings(profile)["mandate"])
+        except OSError:
+            mandate = None
+        if mandate:
+            lines += ["", "## Mandate", ""] + mandates.citation_markdown(mandate)
+            status = mandates.cadence_status(profile, mandate)
+            if status:
+                lines += ["", f"**Cadence (trailing {status['window_days']} "
+                              "days):**"]
+                for r in status["requirements"]:
+                    if r["recorded"] is None:
+                        lines.append(f"- {r['label']}: {r['required']} per "
+                                     "year required")
+                    else:
+                        gap = (f" — {r['shortfall']} more needed"
+                               if r["shortfall"] else " — on track")
+                        lines.append(f"- {r['label']}: {r['recorded']} of "
+                                     f"{r['required']} recorded{gap}")
+
+    prior = retention.readiness_matrix(
+        profile, stale_days,
+        as_of=datetime.now(timezone.utc) - timedelta(days=30))
+    lines += ["", "## Per procedure — ready trainees, now vs 30 days ago", "",
+              "| SOP document | Now | 30 days ago | Direction |",
+              "|---|---|---|---|"]
+    for source in sorted(matrix["source_summary"],
+                         key=lambda s: (matrix["source_summary"][s]["ready"] /
+                                        matrix["source_summary"][s]["total"])):
+        now_s = matrix["source_summary"][source]
+        then_s = prior["source_summary"].get(source)
+        then = f"{then_s['ready']}/{then_s['total']}" if then_s else "—"
+        if then_s is None:
+            direction = "new"
+        else:
+            direction = ("↑ improving" if now_s["ready"] > then_s["ready"]
+                         else "↓ declining" if now_s["ready"] < then_s["ready"]
+                         else "→ holding")
+        lines.append(f"| `{source}` | {now_s['ready']}/{now_s['total']} | "
+                     f"{then} | {direction} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 # --- SOP-gap report ----------------------------------------------------------
 
 def sop_gap_report(profile: str | None) -> str:
@@ -238,13 +363,7 @@ def sop_gap_report(profile: str | None) -> str:
     The framing matters — a high miss rate indicts the DOCUMENT first, the
     trainees second; that's the SOP-gap flywheel."""
     missed = storage.most_missed_sources(profile, limit=50)
-    display = "all profiles"
-    if profile:
-        display = profile
-        try:
-            display = corpus_config.load_config(profile)["display_name"]
-        except OSError:
-            pass
+    display = _display_name(profile)
     today = datetime.now(timezone.utc).date().isoformat()
     lines = [
         f"# SOP-gap report — {display}",

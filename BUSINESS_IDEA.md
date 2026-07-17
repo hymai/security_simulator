@@ -110,6 +110,20 @@ Insurers and auditors are a channel accelerant here: a cyber-insurance premium
 discount or a clean audit finding is a stronger purchase driver than "better
 learning outcomes."
 
+**Geographic wedge: Singapore first** (July 2026 — founder's home market, and
+the regulation does the selling): SCDF requires every FSM-appointed building
+to run **2 table-top exercises + 2 evacuation drills per year** with the CERT
+activated and records kept — a statutory cadence for exactly what Certus
+does. MAS-regulated FIs need documented BCM test records behind an annual
+Board attestation; CII owners (utilities like grid/gas operators, transport,
+healthcare) must exercise IR plans under the Cybersecurity Act and CCoP 2.0;
+MHIs on Jurong Island run safety-case regimes under MOM. The shipped
+Singapore mandate pack (mandates/sg.json: SCDF, MOM×2, MAS, CSA, MHA — with
+citable clauses, cadence tracking, and honest evidence-scope statements)
+plus the `sg_highrise` demo profile make the first meeting concrete: "here
+is your SCDF TTE evidence, generated from your own ERP." No surveyed
+competitor maps Singapore mandates at all.
+
 The wedge is still **security**, but the market is broader: any domain with
 written procedures, a high cost of error, and no safe way to rehearse for real.
 Segments in descending order of willingness-to-pay per seat:
@@ -133,10 +147,14 @@ bottom on price — treat as later expansion, not the wedge.
 - **Docs-in, drills-out**: point it at an org's existing procedures (today: file
   upload via the admin panel; roadmap: SharePoint/Confluence/Notion connectors)
   and get a drill catalog in minutes — this is the demo that wins deals.
-- **Readiness heatmap** (shipped, first version): which procedures, on which
+- **Readiness heatmap & trend** (shipped): which procedures, on which
   people and teams, would fail tonight — with staleness honesty (old
-  observations read as "unknown"). Trend-over-time cuts are the natural next
-  layer on the same recorded data.
+  observations read as "unknown") — plus the trend-over-time layer on the
+  same recorded data: readiness composition snapshotted across the whole
+  history, where staleness makes the line decline when drilling stops, and
+  a downloadable board-pack readiness report (now vs 30 days ago, per
+  procedure). Twelve months of this longitudinal record is the
+  switching-cost moat: it cannot be migrated to a competitor.
 - **SOP-gap feedback loop** (seeded, shipped): when trainees consistently miss
   or reasonably deviate from the same step, the *document* gets flagged, not
   just the trainee. No competitor improves the customer's procedures as a
@@ -200,7 +218,16 @@ weight (iteration 4, shipped), a false negative has compliance consequences,
 not just trust ones. The **override path is shipped**: an instructor can
 review the recorded verbatim answers and override a verdict with a required
 note; the machine verdict is preserved alongside it in every evidence export.
-Grader calibration remains the open half — the seed exists in
-`spike_grader.py` (12/12 agreement on hand-written cases incl. injection
-variants), but a design partner's real answer corpus is what turns that into
-a calibration claim a compliance buyer can cite.
+Grader calibration is now **instrumented as a flywheel** (July 2026, after a
+competitive teardown — see COMPETITIVE_LANDSCAPE.md — showed defensible
+grading is the whitespace no competitor contests): instructors review
+individual recorded gradings in the dashboard's Calibration tab, each review
+becomes a labeled example, the agreement figures (exact-verdict, action-level
+precision/recall, override rate) are embedded live in every evidence export
+— honestly reported as "unmeasured" until reviews exist — and
+`calibrate_grader.py` replays the labeled corpus through the grader so model/
+prompt changes are measured against real answers (spike_grader.py's 12
+synthetic cases remain as the pre-data regression floor). What still needs a
+design partner: volume. The claim a compliance buyer can cite requires
+hundreds of reviewed gradings on a real corpus, and every cohort now
+accumulates them as a byproduct of normal instruction.

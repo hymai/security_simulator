@@ -1,0 +1,136 @@
+{
+  "jurisdiction": "Singapore",
+  "mandates": [
+    {
+      "id": "sg-scdf-cert-tte",
+      "jurisdiction": "Singapore",
+      "regulator": "Singapore Civil Defence Force (SCDF)",
+      "instrument": "Fire Safety Act 1993; Fire Safety (Company Emergency Response Team) Regulations 2013; National CERT Standard; SCDF Guidelines on Table-Top Exercise",
+      "clauses": [
+        "Fire Safety Act 1993 — premises holding a Fire Certificate must maintain an Emergency Response Plan (evacuation, in-place protection, arson prevention, incident mitigation)",
+        "Fire Safety (Company Emergency Response Team) Regulations 2013 — designated premises must establish, train and equip a Company Emergency Response Team",
+        "National CERT Standard (SCDF) — CERT of at least 6: Site Main Controller, Site Incident Controller and 4 response team members, trained for initial response to fire and hazmat incidents before SCDF arrival",
+        "SCDF ERP/TTE guidance — premises with an appointed Fire Safety Manager must conduct at least 2 evacuation drills and 2 table-top exercises per year, documented, with CERT activated during drills"
+      ],
+      "requirement": "FSM-appointed premises must run at least 2 table-top exercises and 2 evacuation drills each year, exercising the premises' own Emergency Response Plan with the CERT activated in their designated roles, and keep documented records.",
+      "applies_to": ["commercial", "high-rise", "industrial", "healthcare", "fsm-premises"],
+      "cadence": {"tabletops_per_year": 2, "drills_per_year": 2},
+      "cadence_basis": "statutory",
+      "evidence_scope": "A Certus tabletop/assessment record evidences the table-top half of this mandate: a scenario-driven exercise against the premises' own ERP/SOPs, with named participants, per-step coverage, and a tamper-evident record. Physical evacuation drills must still be conducted and documented separately (SCDF evacuation drill record) — Certus complements them, it does not substitute.",
+      "sources": [
+        "https://www.scdf.gov.sg/fire-safety-services-listing/company-emergency-response-cert",
+        "https://sso.agc.gov.sg/SL/FSA1993-S540-2013",
+        "https://www.scdf.gov.sg/docs/default-source/fire-safety-docs/company-emergency-response-team-(cert)/national-cert-standard.pdf",
+        "https://www.scdf.gov.sg/docs/default-source/fire-safety-docs/emergency-response-plan/erp-guidelines-on-table-top-exercise.pdf"
+      ]
+    },
+    {
+      "id": "sg-mom-wsh-mhi",
+      "jurisdiction": "Singapore",
+      "regulator": "Ministry of Manpower (MOM)",
+      "instrument": "Workplace Safety and Health (Major Hazard Installations) Regulations 2017; MOM Safety Case Technical Guide",
+      "clauses": [
+        "WSH (MHI) Regulations 2017, reg. 11 — the occupier of a major hazard installation must keep and maintain a safety case",
+        "Safety case regime — the safety case must demonstrate adequate emergency preparedness, including a documented and exercised Emergency Response Plan",
+        "Cross-reference: Fire Safety (Petroleum and Flammable Materials) Regulations — ERP alignment for flammable-materials premises",
+        "Cross-reference: Environmental Protection and Management (Hazardous Substances) Regulations (NEA) — Emergency Action Plan for hazardous-substances licensees"
+      ],
+      "requirement": "Major hazard installations (Jurong-style chemical, petrochemical and process sites) must maintain a safety case demonstrating, among other things, that emergency response plans exist, are known to responders, and are exercised.",
+      "applies_to": ["chemical", "petrochemical", "mhi", "process-industry", "energy"],
+      "cadence": null,
+      "cadence_basis": null,
+      "evidence_scope": "Certus records evidence that named responders can execute the ERP-derived procedures under scenario pressure — supporting the safety case's emergency-preparedness demonstration and regulator walkthroughs. The safety case itself, physical exercises with mutual-aid parties, and NEA/SCDF plan filings remain separate obligations.",
+      "sources": [
+        "https://sso.agc.gov.sg/SL/WSHA2006-S202-2017",
+        "https://www.mom.gov.sg/workplace-safety-and-health/major-hazard-installations",
+        "https://www.mom.gov.sg/-/media/mom/documents/safety-health/mhi/safety-case-technical-guide.pdf"
+      ]
+    },
+    {
+      "id": "sg-mom-wsh-general",
+      "jurisdiction": "Singapore",
+      "regulator": "Ministry of Manpower (MOM)",
+      "instrument": "Workplace Safety and Health Act 2006; WSH (Risk Management) Regulations",
+      "clauses": [
+        "WSH Act 2006, s. 12 — employers must take, so far as is reasonably practicable, measures necessary to ensure the safety and health of employees at work",
+        "WSH (Risk Management) Regulations — risk assessments for all work activities, with control measures and safe work procedures communicated to persons at risk",
+        "Emergency preparedness — risk-management regime expects workplaces to establish and communicate emergency response procedures for foreseeable incidents"
+      ],
+      "requirement": "General workplaces (manufacturing and beyond) must maintain risk assessments and ensure workers know and can execute the safe-work and emergency procedures that apply to them.",
+      "applies_to": ["manufacturing", "logistics", "general-workplace"],
+      "cadence": null,
+      "cadence_basis": null,
+      "evidence_scope": "Certus evidences that the procedures required by the risk-management regime are not just documented but executable by named staff — useful for WSH audits and bizSAFE journeys. It does not replace risk assessments or statutory training/certification.",
+      "sources": [
+        "https://sso.agc.gov.sg/Act/WSHA2006",
+        "https://www.mom.gov.sg/workplace-safety-and-health"
+      ]
+    },
+    {
+      "id": "sg-mas-bcm",
+      "jurisdiction": "Singapore",
+      "regulator": "Monetary Authority of Singapore (MAS)",
+      "instrument": "MAS Guidelines on Business Continuity Management (June 2022); MAS Technology Risk Management Guidelines",
+      "clauses": [
+        "BCM Guidelines (2022) — FIs should conduct regular and comprehensive testing of response and recovery arrangements, including table-top exercises, simulation drills and full-scale recovery tests, across a range of disruption scenarios",
+        "BCM Guidelines (2022) — all test records should be documented: objectives, scope, scenario design, participants, results and follow-ups; gaps reported to senior management",
+        "BCM Guidelines (2022) — senior management should provide an ANNUAL attestation to the Board on the state of BCM preparedness, available to MAS on request",
+        "BCM Guidelines (2022) — independent audit of BCM every 3 years",
+        "TRM Guidelines — incident management and response capabilities should be exercised"
+      ],
+      "requirement": "MAS-regulated financial institutions must test business-continuity and incident-response arrangements regularly with documented records, and senior management must attest annually to the Board on BCM preparedness.",
+      "applies_to": ["financial-services", "banks", "insurers", "capital-markets", "payments"],
+      "cadence": {"tabletops_per_year": 1},
+      "cadence_basis": "suggested — the Guidelines require 'regular and comprehensive' testing without a fixed number; the annual Board attestation makes yearly exercise evidence the practical floor",
+      "evidence_scope": "Certus exercise and assessment records supply the documented test evidence the Guidelines describe (objectives, scenario, participants, results, follow-ups) and give the attesting senior manager per-person execution evidence rather than an attendance list. Recovery-time testing of systems (full-scale recovery tests) is out of scope.",
+      "sources": [
+        "https://www.mas.gov.sg/-/media/mas/regulations-and-financial-stability/regulatory-and-supervisory-framework/risk-management/bcm-guidelines/bcm-guidelines-june-2022.pdf",
+        "https://www.mas.gov.sg/regulation/guidelines/technology-risk-management-guidelines"
+      ]
+    },
+    {
+      "id": "sg-csa-ccop",
+      "jurisdiction": "Singapore",
+      "regulator": "Cyber Security Agency of Singapore (CSA)",
+      "instrument": "Cybersecurity Act 2018; Cybersecurity Code of Practice for Critical Information Infrastructure (CCoP 2.0)",
+      "clauses": [
+        "Cybersecurity Act 2018, s. 16 — CII owners must participate in cybersecurity exercises as required by the Commissioner",
+        "Cybersecurity Act (2024 amendments), s. 16L — providers of essential services using third-party-owned CII must likewise participate in exercises testing readiness for significant cybersecurity incidents",
+        "CCoP 2.0, §7.3 — CII owners must conduct cybersecurity exercises to test and validate incident response plans",
+        "CCoP 2.0 — establish, manage and EXERCISE cybersecurity incident response and crisis communication plans",
+        "Sector note: energy-sector CII (e.g. grid and gas network operators) additionally sit under EMA licence conditions and codes of practice, with multi-agency exercises convened by EMA/CSA"
+      ],
+      "requirement": "Owners of Critical Information Infrastructure — utilities (power, water, gas), transport, healthcare, banking, government — must exercise their cyber incident response plans and participate in Commissioner-directed exercises.",
+      "applies_to": ["cii", "utilities", "energy", "water", "transport", "healthcare", "banking-fmi", "telecom", "government"],
+      "cadence": {"tabletops_per_year": 1},
+      "cadence_basis": "suggested — exercise frequency is as directed by the Commissioner and per CCoP; yearly internal exercising of the IR plan is the practical floor between directed exercises",
+      "evidence_scope": "Certus evidences that on-shift staff can execute the organisation's own cyber IR procedures from free recall — the internal-exercise layer beneath Commissioner-directed sector exercises. Participation in national/sector exercises (e.g. Exercise Cyber Star) remains a separate obligation.",
+      "sources": [
+        "https://www.csa.gov.sg/legislation/cybersecurity-act/",
+        "https://sso.agc.gov.sg/Acts-Supp/9-2018/",
+        "https://isomer-user-content.by.gov.sg/36/2df750a7-a3bc-4d77-a492-d64f0ff4db5a/CCoP---Second-Edition_Revision-One.pdf"
+      ]
+    },
+    {
+      "id": "sg-mha-ipa",
+      "jurisdiction": "Singapore",
+      "regulator": "Ministry of Home Affairs (MHA) / Singapore Police Force — Centre for Protective Security",
+      "instrument": "Infrastructure Protection Act 2017",
+      "clauses": [
+        "Infrastructure Protection Act 2017 — protected areas and protected places must implement security measures to prevent unauthorised entry and manage security incidents",
+        "Infrastructure Protection Act 2017 — designated Special Developments must incorporate security-by-design and maintain security plans",
+        "Centre for Protective Security guidance — security plans are expected to be exercised (incident response, lockdown, evacuation-vs-invacuation decisions); no fixed statutory exercise cadence is prescribed"
+      ],
+      "requirement": "Protected places, critical infrastructure and designated developments must maintain security plans and be able to execute them — with exercising expected under Centre for Protective Security guidance rather than a fixed statutory schedule.",
+      "applies_to": ["protected-places", "critical-infrastructure", "iconic-buildings", "special-developments"],
+      "cadence": null,
+      "cadence_basis": null,
+      "evidence_scope": "Certus evidences that security and operations staff can execute the site's own security response procedures (intrusion, suspicious item, lockdown) under scenario pressure. Declaration status, physical security measures and SPF liaison remain separate obligations; no statutory exercise cadence is claimed because none is prescribed.",
+      "sources": [
+        "https://sso.agc.gov.sg/Act/IPA2017",
+        "https://www.mha.gov.sg/what-we-do/managing-security-threats/protecting-infrastructure/",
+        "https://www.police.gov.sg/Knowledge-Hub/Infrastructure-Protection"
+      ]
+    }
+  ]
+}
