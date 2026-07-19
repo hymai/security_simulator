@@ -76,8 +76,13 @@ def score_session(detail: dict) -> dict:
     rows = []
     for step in detail["steps"]:
         all_ids = set(step["actions"])
-        events = [e for e in detail["events"]
-                  if e["step_number"] == step["step_number"]]
+        all_events = [e for e in detail["events"]
+                      if e["step_number"] == step["step_number"]]
+        # A late/ungraded event (is_graded=0 — recorded verbatim after the
+        # deadline, never scored) must not inflate the attempt count an
+        # auditor reads as "the trainee tried N times" — it carries forward
+        # the last graded event's coverage unchanged, never its own verdict.
+        events = [e for e in all_events if e.get("is_graded", 1)]
         covered = set(events[-1]["covered_ids"]) & all_ids if events else set()
         rows.append({
             "step": step["step_number"],
@@ -165,6 +170,19 @@ def evidence_markdown(detail: dict, include_answers: bool = False) -> str:
         f"| Time limit | "
         f"{settings['time_limit_minutes'] or 'none'}"
         f"{' min' if settings['time_limit_minutes'] else ''} |",
+    ]
+    # Stamped at session start (certus.py): earlier assessments this trainee
+    # started on this profile and never finished. Shown whenever recorded —
+    # including 0 — so an auditor can tell "clean first take" from "recorded
+    # before this field existed" (absent row).
+    try:
+        stored = json.loads(detail.get("settings") or "{}")
+    except (ValueError, TypeError):
+        stored = {}
+    if "abandoned_before_this" in stored:
+        lines.append(f"| Prior unfinished assessments | "
+                     f"{stored['abandoned_before_this']} |")
+    lines += [
         "",
         f"## Verdict",
         "",

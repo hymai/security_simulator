@@ -41,7 +41,14 @@ import storage
 
 
 def examples(profile: str | None = None) -> list[dict]:
-    """All recorded grade events as replayable examples, labeled or not.
+    """All GRADED recorded grade events as replayable examples, labeled or not.
+
+    A late/ungraded event (certus.py's record_late_answer — the model never
+    scored it, see storage.py's is_graded column) is excluded from the
+    returned examples: it would otherwise sit in the review queue and, once
+    labeled, dilute the expert-agreement figure with a comparison against a
+    verdict the model never actually rendered. Its text still contributes to
+    `prior_answer` history in case a later event in the same step needs it.
 
     Adds to each storage row:
       prior_answer — joined earlier attempts for the same session+step
@@ -56,33 +63,34 @@ def examples(profile: str | None = None) -> list[dict]:
     for r in rows:
         key = (r["session_id"], r["step_number"])
         prior = history.setdefault(key, [])
-        all_ids = set(r["actions"])
-        model_ids = sorted(set(r["covered_ids"]) & all_ids)
-        verified = r["verified_ids"]
-        if verified is not None:
-            verified = sorted(set(verified) & all_ids)
-        out.append({
-            "event_id": r["event_id"],
-            "profile": r["profile"],
-            "session_id": r["session_id"],
-            "trainee": r["trainee"],
-            "mode": r["mode"],
-            "step_number": r["step_number"],
-            "attempt": r["attempt"],
-            "title": r["title"],
-            "actions": r["actions"],
-            "sources": r["sources"],
-            "context": r["context_text"] or r["scenario_text"],
-            "prior_answer": "\n".join(prior),
-            "message": r["trainee_answer"],
-            "model_ids": model_ids,
-            "verified_ids": verified,
-            "agree": (model_ids == verified) if verified is not None else None,
-            "labeler": r["labeler"],
-            "note": r["note"],
-            "created_at": r["created_at"],
-            "labeled_at": r["labeled_at"],
-        })
+        if r["is_graded"]:
+            all_ids = set(r["actions"])
+            model_ids = sorted(set(r["covered_ids"]) & all_ids)
+            verified = r["verified_ids"]
+            if verified is not None:
+                verified = sorted(set(verified) & all_ids)
+            out.append({
+                "event_id": r["event_id"],
+                "profile": r["profile"],
+                "session_id": r["session_id"],
+                "trainee": r["trainee"],
+                "mode": r["mode"],
+                "step_number": r["step_number"],
+                "attempt": r["attempt"],
+                "title": r["title"],
+                "actions": r["actions"],
+                "sources": r["sources"],
+                "context": r["context_text"] or r["scenario_text"],
+                "prior_answer": "\n".join(prior),
+                "message": r["trainee_answer"],
+                "model_ids": model_ids,
+                "verified_ids": verified,
+                "agree": (model_ids == verified) if verified is not None else None,
+                "labeler": r["labeler"],
+                "note": r["note"],
+                "created_at": r["created_at"],
+                "labeled_at": r["labeled_at"],
+            })
         prior.append(r["trainee_answer"])
     return out
 

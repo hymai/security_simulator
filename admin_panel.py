@@ -18,6 +18,7 @@ default password.
 """
 
 import hmac
+import json
 import os
 import re
 
@@ -37,20 +38,38 @@ def _sanitize_profile_name(name: str) -> str | None:
     return slug if _PROFILE_SLUG_RE.match(slug) else None
 
 
-def _save_uploads(profile: str, corpus: str, files) -> list[str]:
+def _save_uploads(profile: str, corpus: str, files) -> tuple[list[str], list[str], list[str]]:
     """Write uploaded .md files into profiles/<profile>/data/<corpus>/. Returns
-    the basenames actually written (non-.md uploads are skipped)."""
+    (written, empty, overwritten) basenames — non-.md uploads are silently
+    skipped, but a 0-byte or whitespace-only .md is reported as `empty` rather
+    than written: it would otherwise chunk to zero sections and crash the
+    FIRST TRAINEE's scenario click (SentenceTransformer.encode([]) building a
+    degenerate index that only fails at search time), not the admin who
+    uploaded it. `overwritten` names an existing file replaced in place —
+    grade_events only ever store a source FILENAME, never a content hash, so
+    silently replacing a file retroactively changes what every past evidence
+    export citing that filename is implicitly claiming a trainee was graded
+    against; surfacing it is the least this can do short of versioning."""
     target_dir = os.path.join(retrieval.profile_data_dir(profile), corpus)
     os.makedirs(target_dir, exist_ok=True)
     written = []
+    empty = []
+    overwritten = []
     for f in files:
         name = os.path.basename(f.name)  # defend against path traversal in the filename
         if not name.lower().endswith(".md"):
             continue
-        with open(os.path.join(target_dir, name), "wb") as out:
-            out.write(f.getbuffer())
+        content = f.getbuffer()
+        if not bytes(content).decode("utf-8", errors="ignore").strip():
+            empty.append(name)
+            continue
+        dest = os.path.join(target_dir, name)
+        if os.path.exists(dest):
+            overwritten.append(name)
+        with open(dest, "wb") as out:
+            out.write(content)
         written.append(name)
-    return written
+    return written, empty, overwritten
 
 
 def _render_corpus_management() -> None:
@@ -86,12 +105,43 @@ def _render_corpus_management() -> None:
         for corpus, files in (("threats", threats_files), ("sops", sops_files)):
             if not files:
                 continue
-            written = _save_uploads(profile, corpus, files)
+            written, empty, overwritten = _save_uploads(profile, corpus, files)
+            if empty:
+                st.error(f"Skipped empty/whitespace-only file(s) in {corpus}: "
+                         f"{', '.join(empty)} — nothing was saved for them.")
+            if overwritten:
+                st.warning(
+                    f"Replaced existing file(s) in {corpus}: "
+                    f"{', '.join(overwritten)}. Past evidence exports that "
+                    "cite this filename were graded against the OLD content "
+                    "— they are not retroactively updated or invalidated.")
             if written:
                 st.write(f"Saved {corpus}: {', '.join(written)}")
                 retrieval.build_index(profile, corpus)
                 st.write(f"Rebuilt '{corpus}' index for '{profile}'.")
-        st.success(f"Profile '{profile}' updated.")
+
+        config_path = os.path.join(retrieval.PROFILES_DIR, profile, "config.json")
+        has_threats_index = os.path.exists(
+            os.path.join(retrieval.profile_index_dir(profile), "threats.npz"))
+        if has_threats_index and not os.path.exists(config_path):
+            # A profile only becomes trainee-visible once config.json exists,
+            # which used to require a second, easy-to-miss button click after
+            # this one's "Profile updated" success message — leaving the
+            # profile silently un-trainable. Infer it automatically so a
+            # threats upload alone reaches "trainable" in one click.
+            with st.spinner("Inferring incident types from threats corpus..."):
+                config = build_index.infer_config(profile)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            st.success(f"Profile '{profile}' updated and is now "
+                       f"trainee-visible ({len(config.get('incident_types', {}))} "
+                       "incident types inferred).")
+        elif has_threats_index:
+            st.success(f"Profile '{profile}' updated.")
+        else:
+            st.warning(f"Saved corpus for '{profile}', but no threats corpus "
+                       "is indexed yet — this profile will not appear in the "
+                       "trainee sidebar until a threat catalog is uploaded.")
         st.rerun()
 
     config_path = os.path.join(retrieval.PROFILES_DIR, profile, "config.json")
@@ -103,7 +153,6 @@ def _render_corpus_management() -> None:
         if st.button(label):
             with st.spinner("Asking the model to propose incident types..."):
                 config = build_index.infer_config(profile)
-            import json
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
             st.success(f"Wrote {config_path}")

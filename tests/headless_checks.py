@@ -8,10 +8,12 @@ Run:  .venv/bin/python tests/headless_checks.py
 This is deliberately a plain script, not pytest — same convention as
 spike_grader.py. Every section prints an OK line; any failure raises.
 """
+import json
 import os
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 
 os.environ["CERTUS_RECORD_SESSIONS"] = "1"
@@ -36,6 +38,7 @@ import assessment  # noqa: E402
 import calibration  # noqa: E402
 import pipeline  # noqa: E402
 import retention  # noqa: E402
+import ui_colors  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 
@@ -455,7 +458,374 @@ def check_mandates():
     print("OK mandate in readiness report — citation and cadence gap")
 
 
-# --- section 8: language rule ---------------------------------------------------
+# --- section 8: error recovery (Ollama down, empty answer key) ------------------
+
+def _error_values(at) -> list[str]:
+    """st.error texts from both the main area and the sidebar (the generate
+    form lives in the sidebar, so its errors render there)."""
+    vals = [e.value for e in at.error]
+    try:
+        vals += [e.value for e in at.sidebar.error]
+    except Exception:
+        pass
+    return vals
+
+
+def check_error_recovery():
+    from ollama_client import OllamaError
+
+    def boom(*a, **k):
+        raise OllamaError("Cannot reach Ollama at http://localhost:11434 "
+                          "-- is `ollama serve` running?")
+
+    # (a) Scenario generation fails: friendly error, stage stays 0, no crash.
+    pipeline.generate_scenario = boom
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Scenario generation failed" in v for v in _error_values(at))
+    assert at.session_state["stage"] == 0
+    print("OK error recovery — scenario failure is a message, not a traceback")
+
+    # (b) Answer-key generation fails: scenario intact, retry stays possible.
+    pipeline.generate_scenario = lambda *a, **k: dict(FAKE_SCENARIO)
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    assert at.session_state["stage"] == 1
+    pipeline.generate_answer_key = boom
+    [b for b in at.button if "begin training" in b.label][0].click()
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Response-plan generation failed" in v for v in _error_values(at))
+    assert at.session_state["stage"] == 1
+
+    # (c) Model returns ZERO steps: friendly error, same retry path.
+    pipeline.generate_answer_key = lambda *a, **k: []
+    [b for b in at.button if "begin training" in b.label][0].click()
+    at.run()
+    assert not at.exception, at.exception
+    assert any("empty response plan" in v for v in _error_values(at))
+    assert at.session_state["stage"] == 1
+    print("OK error recovery — key failure and empty key keep the scenario")
+
+    # (d) A retry after the failures works, and a grading failure mid-step
+    # loses nothing: no attempt counted, session resumes when the model is back.
+    pipeline.generate_answer_key = lambda *a, **k: [
+        {"step": 1, "title": "Contain", "threat": "intruder",
+         "actions": {"a1": ("Guard", "lock down the gate")},
+         "sources": ["perimeter.md"]}]
+    [b for b in at.button if "begin training" in b.label][0].click()
+    at.run()
+    assert at.session_state["stage"] == 2
+
+    pipeline.grade_step = boom
+    at.chat_input[0].set_value("lock the gate").run()
+    assert not at.exception, at.exception
+    last = at.session_state["messages"][-1]["content"]
+    assert "no attempt was counted" in last
+    assert at.session_state["current_step"] == 0
+    assert at.session_state["step_answers"] == {}
+    assert "attempt_counts" not in at.session_state
+
+    def ok_grade(step, scenario_text, prior_answer, new_message, **k):
+        ids = set(step["actions"])
+        return {"message_type": "answer_attempt", "covered_ids": ids,
+                "missing_ids": set(), "complete": True, "reply": "ok"}
+    pipeline.grade_step = ok_grade
+    at.chat_input[0].set_value("lock the gate").run()
+    assert at.session_state["complete"] is True
+    print("OK error recovery — failed grading counts nothing; resend succeeds")
+
+
+# --- section 9: post-deadline submission ----------------------------------------
+
+def check_deadline_late_answer():
+    orig_load = assessment.load_settings
+    assessment.load_settings = lambda p: {
+        "pass_threshold": 0.8, "max_attempts_per_step": 2,
+        "time_limit_minutes": 30, "mandate": "", "difficulty": "standard"}
+    pipeline.generate_scenario = lambda *a, **k: dict(FAKE_SCENARIO)
+    pipeline.generate_answer_key = lambda *a, **k: [
+        {"step": 1, "title": "Contain", "threat": "intruder",
+         "actions": {"a1": ("Guard", "lock down the gate"),
+                     "a2": ("Ops", "call the police")}, "sources": ["perimeter.md"]},
+        {"step": 2, "title": "Report", "threat": "aftermath",
+         "actions": {"b1": ("Ops", "file the incident report"),
+                     "b2": ("Mgmt", "notify headquarters")}, "sources": ["reporting.md"]},
+    ]
+    pipeline.grade_step = fake_grade_factory({})
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Assessment — scored, no hints")
+    at.run()
+    at.sidebar.text_input[0].set_value("Tara")
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    [b for b in at.button if "begin assessment" in b.label][0].click()
+    at.run()
+    assert at.session_state["deadline"] is not None
+
+    at.chat_input[0].set_value("FULL lockdown and police").run()  # step 1: 2/2
+
+    # The clock runs out while the trainee is composing step 2's answer.
+    at.session_state["deadline"] = time.time() - 5
+    at.chat_input[0].set_value("LATE: file the report and notify HQ").run()
+    assert not at.exception, at.exception
+
+    msgs = at.session_state["messages"]
+    assert msgs[-2] == {"role": "user",
+                        "content": "LATE: file the report and notify HQ"}
+    assert "after time expired" in msgs[-1]["content"]
+    res = at.session_state["assessment_result"]
+    assert res["reason"] == "time expired"
+    # Score-neutral: step 1 full, step 2 zero — the ungraded late answer
+    # neither helps nor hurts.
+    assert abs(res["score"] - 0.5) < 1e-9
+
+    sid = at.session_state["db_session_id"]
+    detail = storage.session_detail(sid)
+    late = [e for e in detail["events"]
+            if e["trainee_answer"].startswith("LATE:")]
+    assert len(late) == 1
+    assert late[0]["covered_ids"] == [] and late[0]["complete"] == 0
+    assert late[0]["is_graded"] == 0
+    md = assessment.evidence_markdown(detail, include_answers=True)
+    assert "LATE: file the report and notify HQ" in md
+    print("OK deadline — late answer preserved in evidence, ungraded, "
+          "score-neutral")
+
+    # M4: the late event must not read as a real attempt anywhere downstream.
+    scored = assessment.score_session(detail)
+    step2 = [r for r in scored["steps"] if r["step"] == 2][0]
+    assert step2["attempts"] == 0, "late-only step must show zero attempts"
+    import calibration
+    assert not any(e["event_id"] == late[0]["id"]
+                  for e in calibration.examples("default")), \
+        "late event must not enter the calibration review queue"
+    print("OK late answer excluded from attempt count and calibration queue")
+    assessment.load_settings = orig_load
+
+
+# --- section 10: scenario-shopping guard -----------------------------------------
+
+def check_scenario_shopping_guard():
+    pipeline.generate_scenario = lambda *a, **k: dict(FAKE_SCENARIO)
+    pipeline.generate_answer_key = lambda *a, **k: [
+        {"step": 1, "title": "Contain", "threat": "intruder",
+         "actions": {"a1": ("Guard", "lock down the gate")},
+         "sources": ["perimeter.md"]}]
+    pipeline.grade_step = fake_grade_factory({})
+
+    def eve_rows():
+        return [s for s in storage.list_sessions("default")
+                if s["trainee"] == "Eve"]
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Assessment — scored, no hints")
+    at.run()
+    at.sidebar.text_input[0].set_value("Eve")
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    assert at.session_state["stage"] == 1 and len(eve_rows()) == 1
+    first_scenario = at.session_state["scenario"]["text"]
+
+    # Reroll attempt mid-assessment: refused, nothing regenerated.
+    at.sidebar.button[0].click()
+    at.run()
+    assert at.session_state["stage"] == 1
+    assert at.session_state["scenario"]["text"] == first_scenario
+    assert len(eve_rows()) == 1
+    print("OK shopping guard — regenerate is locked during an assessment")
+
+    # Refresh-and-retry (new browser session, same DB): the abandoned row is
+    # counted and stamped into the new assessment's settings and evidence.
+    at2 = AppTest.from_file(APP, default_timeout=30)
+    at2.run()
+    at2.sidebar.radio[0].set_value("Assessment — scored, no hints")
+    at2.run()
+    at2.sidebar.text_input[0].set_value("Eve")
+    at2.sidebar.multiselect[0].set_value(["Physical Security"])
+    at2.sidebar.button[0].click()
+    at2.run()
+    sid = at2.session_state["db_session_id"]
+    row = [s for s in eve_rows() if s["id"] == sid][0]
+    assert json.loads(row["settings"])["abandoned_before_this"] == 1
+    md = assessment.evidence_markdown(storage.session_detail(sid))
+    assert "| Prior unfinished assessments | 1 |" in md
+    print("OK shopping guard — abandoned attempts leave a trail in evidence")
+
+
+# --- section 11: grading regression guard (B4) ----------------------------------
+
+def check_grading_regression_guard():
+    """UAT round 2, live against a real model: attempt 1 credited {a2, a4},
+    then attempt 2 — grading the FULL joined answer after the trainee only
+    ADDED information — credited only {a3}. A real model isn't perfectly
+    self-consistent turn to turn; the app must never let a re-grade take away
+    what was already credited. Reproduces that exact shape with a stateful
+    fake grader, for both the live reply shown to the trainee and the
+    persisted grade_events row."""
+    pipeline.generate_scenario = lambda *a, **k: dict(FAKE_SCENARIO)
+    pipeline.generate_answer_key = lambda *a, **k: [
+        {"step": 1, "title": "Contain", "threat": "intruder",
+         "actions": {"a1": ("Guard", "lock down"), "a2": ("Ops", "call police"),
+                     "a3": ("Mgmt", "log incident"), "a4": ("Sec", "sweep area")},
+         "sources": ["perimeter.md"]},
+    ]
+    calls = {"n": 0}
+
+    def flaky_grade(step, scenario_text, prior_answer, new_message, **k):
+        calls["n"] += 1
+        covered = {"a2", "a4"} if calls["n"] == 1 else {"a3"}
+        all_ids = set(step["actions"])
+        return {"message_type": "answer_attempt", "covered_ids": covered,
+                "missing_ids": all_ids - covered, "complete": covered == all_ids,
+                "reply": "ok"}
+    pipeline.grade_step = flaky_grade
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.text_input[0].set_value("QA Regress")
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    [b for b in at.button if "begin training" in b.label][0].click()
+    at.run()
+
+    at.chat_input[0].set_value("lock down and sweep the area").run()
+    first = at.session_state["messages"][-1]["content"]
+    assert "2 of 4" in first, first
+
+    at.chat_input[0].set_value("also log the incident").run()
+    second = at.session_state["messages"][-1]["content"]
+    # Union of {a2, a4} (attempt 1) and {a3} (attempt 2) is 3 — must never
+    # regress to attempt 2's raw (worse) count of 1.
+    assert "3 of 4" in second, second
+    assert "1 of 4" not in second
+
+    sid = at.session_state["db_session_id"]
+    detail = storage.session_detail(sid)
+    last_event = detail["events"][-1]
+    assert set(last_event["covered_ids"]) == {"a2", "a3", "a4"}
+    assert set(last_event["missing_ids"]) == {"a1"}
+    assert last_event["complete"] == 0
+    print("OK grading regression guard — coverage is a monotonic running union")
+
+
+# --- section 12: unescaped model/corpus text into unsafe_allow_html (M9) -------
+
+def check_html_escaping_guard():
+    """Incident-type labels and scenario fields are model output seeded from
+    admin-uploaded corpus text, then rendered with unsafe_allow_html=True
+    (ui_colors.badge, certus.render_scenario_display). A crafted corpus
+    document making the model echo markup into one of these fields must not
+    reach a trainee's DOM unescaped."""
+    payload = "<img src=x onerror=alert(1)>"
+    badge_html = ui_colors.badge(payload)
+    assert payload not in badge_html
+    assert "&lt;img" in badge_html and "onerror=alert(1)&gt;" in badge_html
+    print("OK ui_colors.badge() HTML-escapes its label")
+
+    # Driven through the real app (not a direct import of certus.py, which is
+    # a top-level Streamlit script) so this exercises the exact call site:
+    # render_scenario_display() -> st.markdown(..., unsafe_allow_html=True).
+    pipeline.generate_scenario = lambda *a, **k: {
+        "incident_types": ["Physical Security"],
+        "threats": [{"incident_type": "<script>alert(1)</script>",
+                     "description": "<b>bold</b> desc"}],
+        "location": "<svg onload=alert(2)>",
+        "time": "now",
+        "scenario": "body <script>evil()</script>",
+        "text": "plain text record, unaffected",
+    }
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()
+    assert not at.exception, at.exception
+    rendered = " | ".join(m.value for m in at.markdown)
+    for raw in ("<script>alert(1)</script>", "<svg onload=alert(2)>",
+               "<script>evil()</script>", "<b>bold</b>"):
+        assert raw not in rendered, f"unescaped markup leaked through: {raw!r}"
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "&lt;svg onload=alert(2)&gt;" in rendered
+    print("OK render_scenario_display() HTML-escapes model-derived fields")
+
+
+# --- section 13: team-forgery guard + case-insensitive abandon match -----------
+
+def check_team_forgery_and_case_insensitive_match():
+    import mandates
+
+    # M6: unfinished_assessments() must casefold like normalize_trainee()
+    # elsewhere — retyping a name with different capitalization must not
+    # reset the abandoned-attempt count F3 relies on.
+    pipeline.generate_scenario = lambda *a, **k: dict(FAKE_SCENARIO)
+    pipeline.generate_answer_key = lambda *a, **k: [
+        {"step": 1, "title": "Contain", "threat": "intruder",
+         "actions": {"a1": ("Guard", "lock down the gate")},
+         "sources": ["perimeter.md"]}]
+    pipeline.grade_step = fake_grade_factory({})
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Assessment — scored, no hints")
+    at.run()
+    at.sidebar.text_input[0].set_value("Mallory")
+    at.sidebar.multiselect[0].set_value(["Physical Security"])
+    at.sidebar.button[0].click()
+    at.run()   # abandoned: never finished
+
+    at2 = AppTest.from_file(APP, default_timeout=30)
+    at2.run()
+    at2.sidebar.radio[0].set_value("Assessment — scored, no hints")
+    at2.run()
+    at2.sidebar.text_input[0].set_value("MALLORY")   # different capitalization
+    at2.sidebar.multiselect[0].set_value(["Physical Security"])
+    at2.sidebar.button[0].click()
+    at2.run()
+    sid = at2.session_state["db_session_id"]
+    row = storage.session_detail(sid)
+    assert json.loads(row["settings"])["abandoned_before_this"] == 1, \
+        "case-insensitive match must still count the earlier abandoned attempt"
+    print("OK M6 — abandoned-assessment match is casefolded like normalize_trainee")
+
+    # M3: a solo trainee typing "Team: ..." directly into the plain name
+    # field must NOT count as a genuine tabletop exercise — only a real
+    # roster entered via the "Tabletop team" field (team_size > 0) should.
+    scdf = mandates.get("sg-scdf-cert-tte")
+    before = mandates.cadence_status("default", scdf)["tabletops"]
+
+    forged_sid = storage.start_session(
+        "default", "Team: Solo", ["Physical Security"], "scenario",
+        mode="training")   # team_size defaults to 0 — no roster was entered
+    storage.complete_session(forged_sid)
+    after_forged = mandates.cadence_status("default", scdf)["tabletops"]
+    assert after_forged == before, \
+        "a 'Team: ' name prefix alone must not inflate tabletop cadence"
+
+    real_sid = storage.start_session(
+        "default", "Team: Ana, Ben", ["Physical Security"], "scenario",
+        mode="training", team_size=2)
+    storage.complete_session(real_sid)
+    after_real = mandates.cadence_status("default", scdf)["tabletops"]
+    assert after_real == before + 1, \
+        "a real roster (team_size > 0) must count toward tabletop cadence"
+    print("OK M3 — forged 'Team: ' name prefix does not inflate tabletop cadence")
+
+
+# --- section 14: language rule ---------------------------------------------------
 
 def check_language_rule():
     assert pipeline._language_rule("English", "x") == ""
@@ -473,4 +843,12 @@ if __name__ == "__main__":
     check_mandates()
     check_readiness_and_dashboard(sid)
     check_language_rule()
+    # These record extra sessions on 'default', so they run after the
+    # sections whose counts (cadence, readiness) assume a fixed history.
+    check_error_recovery()
+    check_deadline_late_answer()
+    check_scenario_shopping_guard()
+    check_grading_regression_guard()
+    check_html_escaping_guard()
+    check_team_forgery_and_case_insensitive_match()
     print("\nALL HEADLESS CHECKS PASSED")

@@ -138,7 +138,13 @@ def ollama_chat(system: str, user: str, schema: dict, temperature: float,
                         on_token(token_count, time.monotonic() - start)
                 if event.get("done"):
                     break
-    except urllib.error.URLError as e:
+    except json.JSONDecodeError as e:
+        raise OllamaError(f"Model sent a malformed streamed line: {e}") from e
+    except OSError as e:
+        # Covers urllib.error.URLError (raised while establishing the
+        # connection) as well as TimeoutError, ConnectionResetError, and
+        # BrokenPipeError — all raised mid-read on a connection that was
+        # already established (a hung, overloaded, or killed Ollama).
         raise OllamaError(
             f"Cannot reach Ollama at {OLLAMA_URL} -- is `ollama serve` running?\n  {e}"
         ) from e
@@ -217,9 +223,9 @@ def _openai_chat(system: str, user: str, schema: dict, temperature: float,
         base["messages"][0]["content"] = fallback_system
         try:
             content = request({**base, "response_format": {"type": "json_object"}})
-        except urllib.error.URLError as e2:
+        except OSError as e2:
             raise OllamaError(f"Cannot reach {OPENAI_BASE_URL}: {e2}") from e2
-    except urllib.error.URLError as e:
+    except OSError as e:
         raise OllamaError(f"Cannot reach {OPENAI_BASE_URL}: {e}") from e
 
     try:

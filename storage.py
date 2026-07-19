@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS retention_state (
 #   override_passed/override_note/override_at — instructor appeal path: the
 #               original verdict is never mutated; an override sits alongside
 #               it and both appear in the evidence export
+#   team_size — number of participants entered in the "Tabletop team" roster
+#               field, 0 for a solo session. This is the actual signal for
+#               "was this a genuine group exercise" — the trainee display
+#               name gets a "Team: " prefix for readability when this is set,
+#               but that prefix is cosmetic and must never itself be trusted
+#               as proof of a team session (a solo trainee can type anything,
+#               including "Team: ..." into the plain name field).
 _SESSION_COLUMNS = {
     "mode": "TEXT NOT NULL DEFAULT 'training'",
     "score": "REAL",
@@ -117,6 +124,7 @@ _SESSION_COLUMNS = {
     "override_passed": "INTEGER",
     "override_note": "TEXT",
     "override_at": "TEXT",
+    "team_size": "INTEGER NOT NULL DEFAULT 0",
 }
 
 # Same in-place upgrade treatment for grade_events.
@@ -126,8 +134,16 @@ _SESSION_COLUMNS = {
 #                  a calibration replay (calibrate_grader.py) can reproduce
 #                  the grading input verbatim. NULL on rows recorded before
 #                  this column existed; readers fall back to scenario_text.
+#   is_graded    — 0 for a message preserved verbatim after the assessment
+#                  deadline passed (certus.py's record_late_answer): the text
+#                  is real, but the model never scored it, so it must not
+#                  count as a genuine attempt anywhere downstream (the
+#                  per-step "Attempts" count, most_missed_sources(), or the
+#                  calibration review queue/agreement figures). Defaults to 1
+#                  so every pre-existing and normally-graded row is unaffected.
 _GRADE_EVENT_COLUMNS = {
     "context_text": "TEXT",
+    "is_graded": "INTEGER NOT NULL DEFAULT 1",
 }
 
 
@@ -162,14 +178,14 @@ def _conn():
 
 def start_session(profile: str, trainee: str, incident_types: list[str],
                   scenario_text: str, mode: str = "training",
-                  settings: dict | None = None) -> int:
+                  settings: dict | None = None, team_size: int = 0) -> int:
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO sessions (profile, trainee, incident_types, scenario_text, "
-            "started_at, mode, settings) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "started_at, mode, settings, team_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (profile, trainee or "Anonymous", json.dumps(incident_types),
              scenario_text, _now(), mode,
-             json.dumps(settings) if settings else None),
+             json.dumps(settings) if settings else None, team_size),
         )
         return cur.lastrowid
 
@@ -189,15 +205,16 @@ def save_steps(session_id: int, steps: list[dict]) -> None:
 
 def record_grade_event(session_id: int, step_number: int, attempt: int,
                        trainee_answer: str, covered_ids, missing_ids,
-                       complete: bool, context_text: str | None = None) -> None:
+                       complete: bool, context_text: str | None = None,
+                       is_graded: bool = True) -> None:
     with _conn() as c:
         c.execute(
             "INSERT INTO grade_events (session_id, step_number, attempt, "
             "trainee_answer, covered_ids, missing_ids, complete, created_at, "
-            "context_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "context_text, is_graded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, step_number, attempt, trainee_answer,
              json.dumps(sorted(covered_ids)), json.dumps(sorted(missing_ids)),
-             int(complete), _now(), context_text),
+             int(complete), _now(), context_text, int(is_graded)),
         )
 
 
@@ -227,6 +244,23 @@ def override_assessment(session_id: int, passed: bool, note: str) -> None:
             "UPDATE sessions SET override_passed = ?, override_note = ?, "
             "override_at = ? WHERE id = ?",
             (int(passed), note.strip(), _now(), session_id))
+
+
+def unfinished_assessments(profile: str, trainee: str) -> int:
+    """How many assessments this trainee started on this profile and never
+    finished. Stamped into the settings snapshot of each NEW assessment
+    (certus.py) so scenario-shopping — abandoning an unwanted scenario via a
+    refresh and starting over — leaves a visible trail in the evidence.
+
+    Matched via normalize_trainee(), same as everywhere else a trainee name
+    is compared — an exact SQL match would let retyping a name with different
+    capitalization reset the abandoned-attempt count this exists to track."""
+    key = normalize_trainee(trainee)
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT trainee FROM sessions WHERE profile = ? AND "
+            "mode = 'assessment' AND completed_at IS NULL", (profile,)).fetchall()
+        return sum(1 for r in rows if normalize_trainee(r["trainee"]) == key)
 
 
 # --- reads, for instructor_dashboard.py -------------------------------------
@@ -306,7 +340,7 @@ def calibration_events(profile: str | None = None) -> list[dict]:
     query = (
         "SELECT ge.id AS event_id, ge.session_id, ge.step_number, ge.attempt, "
         "ge.trainee_answer, ge.covered_ids, ge.complete, ge.created_at, "
-        "ge.context_text, "
+        "ge.context_text, ge.is_graded, "
         "se.profile, se.trainee, se.mode, se.scenario_text, "
         "st.title, st.actions, st.sources, "
         "cl.verified_ids, cl.labeler, cl.note, cl.created_at AS labeled_at "
@@ -450,7 +484,7 @@ def most_missed_sources(profile: str | None = None, limit: int = 10) -> list[dic
             "JOIN grade_events ge "
             "  ON ge.session_id = st.session_id AND ge.step_number = st.step_number "
             "JOIN sessions se ON se.id = st.session_id "
-            "WHERE ge.attempt = 1"
+            "WHERE ge.attempt = 1 AND ge.is_graded = 1"
         )
         params: tuple = ()
         if profile:

@@ -71,8 +71,12 @@ def cadence_status(profile: str, mandate: dict,
     from recorded sessions. None when the mandate carries no cadence.
 
     Counted from what Certus actually records:
-    - table-top exercises: completed sessions recorded under a team name
-      (certus.py stores tabletop drills with a "Team: " trainee prefix);
+    - table-top exercises: completed sessions with a real participant roster
+      entered in the "Tabletop team" field (storage.py's team_size column —
+      NOT a "Team: " string prefix on the trainee name, which a solo trainee
+      could type into the plain name field themselves and would otherwise
+      count toward a regulator-facing cadence figure without an actual group
+      exercise happening);
     - assessments: finished scored assessments (any trainee).
     Physical evacuation drills happen outside Certus, so a drills-per-year
     requirement is surfaced as a reminder row with no recorded count rather
@@ -85,7 +89,7 @@ def cadence_status(profile: str, mandate: dict,
     sessions = [s for s in storage.list_sessions(profile)
                 if s["started_at"] >= cutoff]
     tabletops = sum(1 for s in sessions
-                    if s["completed_at"] and s["trainee"].startswith("Team: "))
+                    if s["completed_at"] and (s["team_size"] or 0) > 0)
     assessments = sum(1 for s in sessions
                       if s.get("mode") == "assessment"
                       and s.get("score") is not None)

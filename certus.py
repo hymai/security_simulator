@@ -20,6 +20,7 @@ Run:  ollama serve            # in another terminal, with qwen2.5:14b pulled
       streamlit run certus.py
 """
 
+import html
 import logging
 import time
 
@@ -33,6 +34,7 @@ import retention
 import retrieval
 import storage
 import ui_colors
+from ollama_client import OllamaError
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("certus.app")
@@ -50,8 +52,9 @@ def warm_up(profile: str):
 def reset_session():
     for k in ("scenario", "steps", "current_step", "messages", "complete", "profile",
              "record_session", "trainee_name", "db_session_id", "attempt_counts",
-             "step_answers", "retention_updates", "mode", "assessment_settings",
-             "deadline", "assessment_result", "inject_revealed", "team_names"):
+             "step_answers", "step_covered", "retention_updates", "mode",
+             "assessment_settings", "deadline", "assessment_result",
+             "inject_revealed", "team_names"):
         st.session_state.pop(k, None)
     st.session_state.stage = 0
 
@@ -108,21 +111,27 @@ def render_scenario_display(scenario: dict) -> str:
     scenario["text"] (plain, no HTML) is what gets downloaded as the training
     record, so it has to stay readable as raw markdown — the color coding is
     layered on separately here, from the same structured `threats` list, and
-    rendered with unsafe_allow_html=True only at the call site below."""
+    rendered with unsafe_allow_html=True only at the call site below.
+
+    Every field interpolated here is model output seeded from the admin's
+    uploaded threat corpus (pipeline.generate_scenario) — not hand-authored
+    copy — so each is HTML-escaped before interpolation. ui_colors.badge()
+    escapes its own label internally; the plaintext fields around it (desc,
+    location, time, the scenario body) do not get that protection for free."""
     lines = []
     for t in scenario.get("threats", []):
         if isinstance(t, dict):
             label = t.get("incident_type", "")
-            desc = t.get("description", "")
+            desc = html.escape(t.get("description", ""))
             lines.append(f"- {ui_colors.badge(label)} {desc}" if label else f"- {desc}")
         else:
-            lines.append(f"- {t}")
+            lines.append(f"- {html.escape(str(t))}")
     return (
         "**Incident type & Threat**\n"
         + "\n".join(lines) + "\n\n"
-        f"**Location**: {scenario.get('location', '')}\n\n"
-        f"**Time**: {scenario.get('time', '')}\n\n"
-        f"**Scenario**\n\n{scenario.get('scenario', '')}"
+        f"**Location**: {html.escape(scenario.get('location', ''))}\n\n"
+        f"**Time**: {html.escape(scenario.get('time', ''))}\n\n"
+        f"**Scenario**\n\n{html.escape(scenario.get('scenario', ''))}"
     )
 
 
@@ -163,6 +172,26 @@ def build_reply(verdict: dict, steps: list) -> str:
         f"Now give me the actions for **Step {idx + 2}**.{orient}"
         f"{inject_reveal_if_due(steps)}"
     )
+
+
+def record_late_answer(steps: list, prompt: str) -> None:
+    """A message submitted after the assessment deadline: preserved verbatim in
+    the recorded evidence (the auditor should see it existed), but never
+    graded — coverage and completion are carried over from the step's last
+    graded event, so the score is exactly what it was when time ran out."""
+    step = steps[st.session_state.current_step]
+    detail = storage.session_detail(st.session_state.db_session_id)
+    prior = [e for e in detail["events"] if e["step_number"] == step["step"]]
+    covered = prior[-1]["covered_ids"] if prior else []
+    missing = prior[-1]["missing_ids"] if prior else sorted(step["actions"])
+    was_complete = bool(prior[-1]["complete"]) if prior else False
+    attempt_counts = st.session_state.setdefault("attempt_counts", {})
+    attempt = attempt_counts.get(step["step"], 0) + 1
+    attempt_counts[step["step"]] = attempt
+    storage.record_grade_event(
+        st.session_state.db_session_id, step["step"], attempt, prompt,
+        covered, missing, was_complete, context_text=grading_context(),
+        is_graded=False)
 
 
 def finalize_assessment(reason: str) -> str:
@@ -338,7 +367,20 @@ if profiles:
     )
     config = corpus_config.load_config(active_profile)
     incident_types = list(config["incident_types"])
-    warm_up(active_profile)
+    try:
+        warm_up(active_profile)
+    except Exception as e:
+        # Unguarded, this runs ahead of the incident-type form and any retry
+        # button — a blocked/offline BGE-M3 download (or a corrupt corpus) has
+        # no UI to even show itself on, just a raw traceback. Reloading the
+        # page is the retry path once connectivity/corpus is fixed, since
+        # st.cache_resource never cached the failed attempt.
+        st.error(f"**Failed to load the embedding model or this profile's "
+                 f"indices.**\n\n{e}\n\nThis is usually a blocked or offline "
+                 "BGE-M3 download (proxy/firewall on first launch) or a "
+                 "problem with the profile's corpus. Fix connectivity or the "
+                 "corpus, then reload the page.")
+        st.stop()
 
     st.sidebar.markdown(
         " ".join(ui_colors.badge(t) for t in incident_types), unsafe_allow_html=True)
@@ -422,12 +464,30 @@ if profiles:
                  "recording is on, it's recorded under the team's name.")
         team_members = [n.strip() for n in team_raw.split(",") if n.strip()]
 
+    # Once an assessment scenario exists, regenerating is locked until the
+    # assessment finishes: the scenario preview must not be rerollable until
+    # an easy one comes up ("scenario shopping") — the verdict's credibility
+    # rests on the trainee taking the drill they were dealt. A refresh can
+    # still abandon a session, but abandoned assessment rows are counted and
+    # stamped into the NEXT assessment's evidence (see below).
+    assessment_locked = (st.session_state.get("mode") == "assessment"
+                         and st.session_state.stage >= 1
+                         and not st.session_state.get("complete"))
+
     with st.sidebar.form("generate_form"):
         selected = st.multiselect("Incident type(s)", incident_types,
                                   key=f"types_{active_profile}")
+        if assessment_locked:
+            st.caption("🔒 An assessment is in progress — finish it to "
+                       "generate a new scenario. Abandoned assessments are "
+                       "recorded and appear in your next assessment's "
+                       "evidence.")
 
-        if st.form_submit_button("Generate Scenario"):
-            if not selected:
+        if st.form_submit_button("Generate Scenario", disabled=assessment_locked):
+            if assessment_locked:
+                st.sidebar.warning("An assessment is in progress — finish it "
+                                   "before generating a new scenario.")
+            elif not selected:
                 st.sidebar.warning("Select at least one incident type.")
             elif mode == "assessment" and (not record_session or not trainee_name.strip()):
                 st.sidebar.warning(
@@ -435,32 +495,54 @@ if profiles:
                     "turned on — the recorded answers ARE the evidence behind "
                     "the verdict. Use training mode to practice anonymously.")
             else:
-                reset_session()
-                st.session_state.profile = active_profile
-                st.session_state.mode = mode
-                st.session_state.team_names = team_members
-                if mode == "assessment":
-                    st.session_state.assessment_settings = \
-                        assessment.load_settings(active_profile)
-                st.session_state.scenario = run_with_progress(
-                    "Generating scenario…", pipeline.generate_scenario, selected,
-                    profile=active_profile, difficulty=difficulty)
-                st.session_state.stage = 1
+                # Generate BEFORE resetting: if the model is unreachable the
+                # current session (and its screen) survives untouched.
+                try:
+                    scenario = run_with_progress(
+                        "Generating scenario…", pipeline.generate_scenario,
+                        selected, profile=active_profile, difficulty=difficulty)
+                except OllamaError as e:
+                    scenario = None
+                    st.error(f"**Scenario generation failed.**\n\n{e}\n\n"
+                             "Nothing was lost — fix the model server (is "
+                             "`ollama serve` running with both models pulled?) "
+                             "and click **Generate Scenario** again.")
+                if scenario:
+                    reset_session()
+                    st.session_state.profile = active_profile
+                    st.session_state.mode = mode
+                    st.session_state.team_names = team_members
+                    if mode == "assessment":
+                        st.session_state.assessment_settings = \
+                            assessment.load_settings(active_profile)
+                    st.session_state.scenario = scenario
+                    st.session_state.stage = 1
 
-                st.session_state.record_session = storage.RECORDING_ENABLED and record_session
-                if st.session_state.record_session:
-                    # A tabletop drill is recorded under the team's collective
-                    # name — retention then tracks the team as a unit, which
-                    # is the honest granularity for a group exercise.
-                    if team_members:
-                        st.session_state.trainee_name = "Team: " + ", ".join(team_members)
-                    else:
-                        st.session_state.trainee_name = trainee_name.strip() or "Anonymous"
-                    st.session_state.db_session_id = storage.start_session(
-                        active_profile, st.session_state.trainee_name, selected,
-                        st.session_state.scenario["text"], mode=mode,
-                        settings=(st.session_state.get("assessment_settings")
-                                  or {"difficulty": difficulty}))
+                    st.session_state.record_session = storage.RECORDING_ENABLED and record_session
+                    if st.session_state.record_session:
+                        # A tabletop drill is recorded under the team's collective
+                        # name — retention then tracks the team as a unit, which
+                        # is the honest granularity for a group exercise.
+                        if team_members:
+                            st.session_state.trainee_name = "Team: " + ", ".join(team_members)
+                        else:
+                            st.session_state.trainee_name = trainee_name.strip() or "Anonymous"
+                        settings = (st.session_state.get("assessment_settings")
+                                    or {"difficulty": difficulty})
+                        if mode == "assessment":
+                            # Stamp how many earlier assessments this trainee
+                            # started on this profile and never finished —
+                            # scenario-shopping via refresh leaves a visible
+                            # trail in the evidence instead of vanishing.
+                            settings = {**settings,
+                                        "abandoned_before_this":
+                                            storage.unfinished_assessments(
+                                                active_profile,
+                                                st.session_state.trainee_name)}
+                        st.session_state.db_session_id = storage.start_session(
+                            active_profile, st.session_state.trainee_name, selected,
+                            st.session_state.scenario["text"], mode=mode,
+                            settings=settings, team_size=len(team_members))
 else:
     st.sidebar.info("No profiles yet — use Admin below to upload a corpus.")
 
@@ -487,11 +569,24 @@ if st.session_state.stage == 1:
         st.caption(f"⏱ The {st.session_state.assessment_settings['time_limit_minutes']}-minute "
                    "timer starts when the response plan is ready, not now.")
     if st.button(begin_label):
-        steps = run_with_progress(
-            "Deriving the response plan (this is the slower stage — typically "
-            "1-2 minutes on this model/hardware)…",
-            pipeline.generate_answer_key, st.session_state.scenario,
-            profile=st.session_state.profile)
+        try:
+            steps = run_with_progress(
+                "Deriving the response plan (this is the slower stage — typically "
+                "1-2 minutes on this model/hardware)…",
+                pipeline.generate_answer_key, st.session_state.scenario,
+                profile=st.session_state.profile)
+        except OllamaError as e:
+            steps = None
+            st.error(f"**Response-plan generation failed.**\n\n{e}\n\n"
+                     "The scenario above is intact — fix the model server "
+                     "and click the button again.")
+        if steps is not None and not steps:
+            steps = None
+            st.error("The model returned an **empty response plan** — a "
+                     "generation fluke, not something you did. Click the "
+                     "button to try again, or generate a new scenario.")
+        if steps is None:
+            st.stop()
         st.session_state.steps = steps
         st.session_state.current_step = 0
         st.session_state.complete = False
@@ -547,20 +642,56 @@ if st.session_state.stage == 2:
     is_assessment = st.session_state.get("mode") == "assessment"
     deadline = st.session_state.get("deadline")
 
+    # The chat input is read up front (it renders pinned to the bottom of the
+    # page regardless of code position) so that a message submitted after the
+    # deadline still reaches this run — instead of the widget never being
+    # instantiated on the finalizing rerun and the trainee's text silently
+    # vanishing.
+    prompt = None
+    if not st.session_state.complete:
+        prompt = st.chat_input("Describe the actions for the current step…")
+
     # Passive expiry check: catches a refresh/rerun after the clock ran out,
     # so an expired assessment finalizes even if no further message is sent.
+    # A message that arrived with this run is preserved in the evidence
+    # (verbatim, ungraded, score-neutral) — never silently discarded.
     if is_assessment and deadline and not st.session_state.complete \
             and time.time() > deadline:
+        late_note = ""
+        if prompt:
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            record_late_answer(steps, prompt)
+            late_note = ("⚠️ Your last message arrived **after time expired** — "
+                         "it was recorded verbatim in the assessment evidence "
+                         "but not graded, and it does not change the score. ")
+            prompt = None
         st.session_state.messages.append(
-            {"role": "assistant", "content": finalize_assessment("time expired")})
+            {"role": "assistant",
+             "content": late_note + finalize_assessment("time expired")})
 
     if not st.session_state.complete:
-        current = steps[st.session_state.current_step]
-        cue = current.get("threat", "")
-        suffix = f" — responding to: {cue}" if cue else ""
+        def progress_line() -> str:
+            current = steps[st.session_state.current_step]
+            cue = current.get("threat", "")
+            suffix = f" — responding to: {cue}" if cue else ""
+            return (f"Progress: **Step {st.session_state.current_step + 1} "
+                    f"of {n}**{suffix}")
+
         if is_assessment and deadline:
-            suffix += f" · ⏱ {max(0.0, (deadline - time.time()) / 60):.0f} min left"
-        st.info(f"Progress: **Step {st.session_state.current_step + 1} of {n}**{suffix}")
+            # Self-refreshing fragment: without it the countdown only updates
+            # when the trainee interacts, so the display can show minutes
+            # remaining long after the clock ran out. On reaching zero it
+            # triggers a full rerun so the passive expiry check finalizes.
+            @st.fragment(run_every=10)
+            def timed_progress():
+                remaining = deadline - time.time()
+                if remaining <= 0 and not st.session_state.complete:
+                    st.rerun(scope="app")
+                st.info(f"{progress_line()} · "
+                        f"⏱ {max(0.0, remaining / 60):.0f} min left")
+            timed_progress()
+        else:
+            st.info(progress_line())
 
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
@@ -571,7 +702,7 @@ if st.session_state.stage == 2:
             render_assessment_summary()
         else:
             render_summary_download(steps)
-    elif prompt := st.chat_input("Describe the actions for the current step…"):
+    elif prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -584,13 +715,49 @@ if st.session_state.stage == 2:
 
         with st.chat_message("assistant"), st.spinner("Thinking…"):
             language = corpus_config.load_config(st.session_state.profile)["language"]
-            verdict = pipeline.grade_step(step, scenario_text, prior_answer, prompt,
-                                          language=language)
+            try:
+                verdict = pipeline.grade_step(step, scenario_text, prior_answer,
+                                              prompt, language=language)
+            except OllamaError as e:
+                # The answer was NOT graded, recorded, or counted as an
+                # attempt — the trainee resends it once the model is back,
+                # with the session state exactly as it was.
+                reply = ("⚠️ **Grading failed — your answer was not graded "
+                         "and no attempt was counted.**\n\n"
+                         f"`{e}`\n\n"
+                         "Once the model server is reachable again, copy your "
+                         "answer from above and send it again.")
+                st.markdown(reply)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": reply})
+                st.rerun()
 
             # Only a genuine answer attempt adds to what's graded next turn —
             # a clarifying question contributes no coverage (see grading.py).
             if verdict["message_type"] == "answer_attempt":
                 step_answers.setdefault(step_number, []).append(prompt)
+
+                # grade_step re-derives coverage from scratch each turn by
+                # judging the FULL joined answer (prior_answer + new_message)
+                # — it does not keep its own running union, and a real model
+                # is not perfectly self-consistent turn to turn: confirmed
+                # live, the same (longer, strictly more complete) answer can
+                # grade WORSE on a later turn than the first turn alone did.
+                # Never trust one turn's raw output as the step's whole
+                # coverage — OR it into everything already credited, so a
+                # re-grade can only ever add, never take away. This is also
+                # what makes the persisted covered_ids monotonic, so
+                # score_session (which reads the last event) and the late-
+                # answer carry-forward (which reads the last event too) are
+                # correct without changes of their own.
+                all_ids = set(step["actions"])
+                step_covered = st.session_state.setdefault("step_covered", {})
+                total_covered = (step_covered.get(step_number, set())
+                                | verdict["covered_ids"]) & all_ids
+                step_covered[step_number] = total_covered
+                verdict["covered_ids"] = total_covered
+                verdict["missing_ids"] = all_ids - total_covered
+                verdict["complete"] = total_covered == all_ids
 
                 if st.session_state.get("record_session"):
                     attempt_counts = st.session_state.setdefault("attempt_counts", {})

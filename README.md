@@ -63,10 +63,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Requires a local [Ollama](https://ollama.com) install with the model pulled:
+Requires a local [Ollama](https://ollama.com) install with **both** models
+pulled (scenario generation uses `mistral-nemo:12b`; answer keys and grading
+use `qwen2.5:14b`):
 
 ```bash
 ollama pull qwen2.5:14b
+ollama pull mistral-nemo:12b
 ```
 
 ## Run
